@@ -11,7 +11,7 @@ Things done:
            It's worth noticing here that ls/cat etc won't use system calls but instead the functions that were implemented in
            this sample program.
            5. fusermount -u /tmp/ssfs (Then use this command to unmount the folder)
-
+########################################################################################################################
 Questions:
     1. Ask if that's the right API documentation: http://libfuse.github.io/doxygen/
     2. Or just checking the source code here: https://github.com/libfuse/libfuse/blob/6adcb719a933a31013c73fda8e0ccb0e13b45e58/include/fuse.h
