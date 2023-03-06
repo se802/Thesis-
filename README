@@ -31,4 +31,5 @@ Try to undrestand why different error messages since both operations were not im
 #######################################################################################################################
 Todo:
     1.Have a look at: https://stackoverflow.com/questions/15604191/fuse-detailed-documentation
+    2.see how multithreaded execution affect fuse and how lib_fuse_main works. 
 
