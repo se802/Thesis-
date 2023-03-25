@@ -1,175 +1,221 @@
-#define FUSE_USE_VERSION 30
 
-#include <fuse.h>
+/** @file
+ *
+ * minimal example filesystem using low-level API
+ *
+ * Compile with:
+ *     gcc -Wall hello_ll.c `pkg-config fuse3 --cflags --libs` -o hello_ll
+ *     ./hello_ll -f /tmp/ssfs
+ */
+
+#define FUSE_USE_VERSION 34
+
+#include <fuse3/fuse_lowlevel.h>
 #include <stdio.h>
-#include <unistd.h>
-#include <sys/types.h>
-#include <time.h>
-#include <string.h>
 #include <stdlib.h>
-#include <asm-generic/errno-base.h>
+#include <string.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <assert.h>
 
+static const char *hello_str = "Hello World!\n";
+static const char *hello_name = "hello";
 
-char dir_list[ 256 ][ 256 ];
-int curr_dir_idx = -1;
-
-char files_list[ 256 ][ 256 ];
-int curr_file_idx = -1;
-
-char files_content[ 256 ][ 256 ];
-int curr_file_content_idx = -1;
-
-
-void add_dir( const char *dir_name )
+static int hello_stat(fuse_ino_t ino, struct stat *stbuf)
 {
-    curr_dir_idx++;
-    strcpy( dir_list[ curr_dir_idx ], dir_name );
-}
+    stbuf->st_ino = ino;
+    switch (ino) {
+        case 1:
+            stbuf->st_mode = S_IFDIR | 0755;
+            stbuf->st_nlink = 2;
+            break;
 
-int is_dir( const char *path )
-{
-    path++; // Eliminating "/" in the path
+        case 2:
+            stbuf->st_mode = S_IFREG | 0444;
+            stbuf->st_nlink = 1;
+            stbuf->st_size = strlen(hello_str);
+            break;
 
-    for ( int curr_idx = 0; curr_idx <= curr_dir_idx; curr_idx++ )
-        if ( strcmp( path, dir_list[ curr_idx ] ) == 0 )
-            return 1;
-
+        default:
+            return -1;
+    }
     return 0;
 }
 
-void add_file( const char *filename )
+static void hello_ll_getattr(fuse_req_t req, fuse_ino_t ino,
+                             struct fuse_file_info *fi)
 {
-    curr_file_idx++;
-    strcpy( files_list[ curr_file_idx ], filename );
+    struct stat stbuf;
 
-    curr_file_content_idx++;
-    strcpy( files_content[ curr_file_content_idx ], "" );
-}
+    (void) fi;
 
-int is_file( const char *path )
-{
-    path++; // Eliminating "/" in the path
-
-    for ( int curr_idx = 0; curr_idx <= curr_file_idx; curr_idx++ )
-        if ( strcmp( path, files_list[ curr_idx ] ) == 0 )
-            return 1;
-
-    return 0;
-}
-
-int get_file_index( const char *path )
-{
-    path++; // Eliminating "/" in the path
-
-    for ( int curr_idx = 0; curr_idx <= curr_file_idx; curr_idx++ )
-        if ( strcmp( path, files_list[ curr_idx ] ) == 0 )
-            return curr_idx;
-
-    return -1;
-}
-
-void write_to_file( const char *path, const char *new_content )
-{
-    int file_idx = get_file_index( path );
-
-    if ( file_idx == -1 ) // No such file
-        return;
-
-    strcpy( files_content[ file_idx ], new_content );
-}
-
-static int do_getattr( const char *path, struct stat *st )
-{
-    st->st_uid = getuid(); // The owner of the file/directory is the user who mounted the filesystem
-    st->st_gid = getgid(); // The group of the file/directory is the same as the group of the user who mounted the filesystem
-    st->st_atime = time( NULL ); // The last "a"ccess of the file/directory is right now
-    st->st_mtime = time( NULL ); // The last "m"odification of the file/directory is right now
-
-    if ( strcmp( path, "/" ) == 0 || is_dir( path ) == 1 )
-    {
-        st->st_mode = S_IFDIR | 0755;
-        st->st_nlink = 2;
-    }
-    else if ( is_file( path ) == 1 )
-    {
-        st->st_mode = S_IFREG | 0644;
-        st->st_nlink = 1;
-        st->st_size = 1024;
-    }
+    memset(&stbuf, 0, sizeof(stbuf));
+    if (hello_stat(ino, &stbuf) == -1)
+        fuse_reply_err(req, ENOENT);
     else
-    {
-        return -ENOENT;
+        fuse_reply_attr(req, &stbuf, 1.0);
+}
+
+static void hello_ll_lookup(fuse_req_t req, fuse_ino_t parent, const char *name)
+{
+    struct fuse_entry_param e;
+
+    if (parent != 1 || strcmp(name, hello_name) != 0)
+        fuse_reply_err(req, ENOENT);
+    else {
+        memset(&e, 0, sizeof(e));
+        e.ino = 2;
+        e.attr_timeout = 1.0;
+        e.entry_timeout = 1.0;
+        hello_stat(e.ino, &e.attr);
+
+        fuse_reply_entry(req, &e);
     }
-
-    return 0;
 }
 
-static int do_readdir( const char *path, void *buffer, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi )
-{
-    filler( buffer, ".", NULL, 0 ); // Current Directory
-    filler( buffer, "..", NULL, 0 ); // Parent Directory
-
-    if ( strcmp( path, "/" ) == 0 ) // If the user is trying to show the files/directories of the root directory show the following
-    {
-        for ( int curr_idx = 0; curr_idx <= curr_dir_idx; curr_idx++ )
-            filler( buffer, dir_list[ curr_idx ], NULL, 0 );
-
-        for ( int curr_idx = 0; curr_idx <= curr_file_idx; curr_idx++ )
-            filler( buffer, files_list[ curr_idx ], NULL, 0 );
-    }
-
-    return 0;
-}
-
-
-static int do_read( const char *path, char *buffer, size_t size, off_t offset, struct fuse_file_info *fi )
-{
-    int file_idx = get_file_index( path );
-
-    if ( file_idx == -1 )
-        return -1;
-
-    char *content = files_content[ file_idx ];
-
-    memcpy( buffer, content + offset, size );
-
-    return strlen( content ) - offset;
-}
-
-
-static int do_mkdir( const char *path, mode_t mode )
-{
-    path++;
-    add_dir( path );
-
-    return 0;
-}
-
-static int do_mkfile( const char *path, mode_t mode, dev_t rdev )
-{
-    path++;
-    add_file( path );
-
-    return 0;
-}
-
-static int do_write( const char *path, const char *buffer, size_t size, off_t offset, struct fuse_file_info *info )
-{
-    write_to_file( path, buffer );
-
-    return size;
-}
-
-static struct fuse_operations operations = {
-        .getattr	= do_getattr,
-        .readdir	= do_readdir,
-        .read		= do_read,
-        .mkdir		= do_mkdir,
-        .mknod		= do_mkfile,
-        .write		= do_write,
+struct dirbuf {
+    char *p;
+    size_t size;
 };
 
-int main( int argc, char *argv[] )
+static void dirbuf_add(fuse_req_t req, struct dirbuf *b, const char *name,
+                       fuse_ino_t ino)
 {
-    return fuse_main( argc, argv, &operations, NULL );
+    struct stat stbuf;
+    size_t oldsize = b->size;
+    b->size += fuse_add_direntry(req, NULL, 0, name, NULL, 0);
+    b->p = (char *) realloc(b->p, b->size);
+    memset(&stbuf, 0, sizeof(stbuf));
+    stbuf.st_ino = ino;
+    fuse_add_direntry(req, b->p + oldsize, b->size - oldsize, name, &stbuf,
+                      b->size);
+}
+
+#define min(x, y) ((x) < (y) ? (x) : (y))
+
+static int reply_buf_limited(fuse_req_t req, const char *buf, size_t bufsize,
+                             off_t off, size_t maxsize)
+{
+    if (off < bufsize)
+        return fuse_reply_buf(req, buf + off,
+                              min(bufsize - off, maxsize));
+    else
+        return fuse_reply_buf(req, NULL, 0);
+}
+
+static void hello_ll_readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
+                             off_t off, struct fuse_file_info *fi)
+{
+    printf("In readdir\n");
+    (void) fi;
+
+    if (ino != 1)
+        fuse_reply_err(req, ENOTDIR);
+    else {
+        struct dirbuf b;
+
+        memset(&b, 0, sizeof(b));
+        dirbuf_add(req, &b, ".", 1);
+        dirbuf_add(req, &b, "..", 1);
+        dirbuf_add(req, &b, hello_name, 2);
+        reply_buf_limited(req, b.p, b.size, off, size);
+        free(b.p);
+    }
+}
+
+static void hello_ll_open(fuse_req_t req, fuse_ino_t ino,
+                          struct fuse_file_info *fi)
+{
+    if (ino != 2)
+        fuse_reply_err(req, EISDIR);
+    else if ((fi->flags & O_ACCMODE) != O_RDONLY)
+        fuse_reply_err(req, EACCES);
+    else
+        fuse_reply_open(req, fi);
+}
+
+static void hello_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size,
+                          off_t off, struct fuse_file_info *fi)
+{
+    (void) fi;
+
+    assert(ino == 2);
+    reply_buf_limited(req, hello_str, strlen(hello_str), off, size);
+}
+
+static const struct fuse_lowlevel_ops hello_ll_oper = {
+        .lookup		= hello_ll_lookup,
+        .getattr	= hello_ll_getattr,
+        .readdir	= hello_ll_readdir,
+        .open		= hello_ll_open,
+        .read		= hello_ll_read,
+};
+
+int main(int argc, char *argv[])
+{
+    struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
+    struct fuse_session *se;
+    struct fuse_cmdline_opts opts;
+    struct fuse_loop_config config;
+    int ret = -1;
+
+    if (fuse_parse_cmdline(&args, &opts) != 0)
+        return 1;
+    if (opts.show_help) {
+        printf("usage: %s [options] <mountpoint>\n\n", argv[0]);
+        fuse_cmdline_help();
+        fuse_lowlevel_help();
+        ret = 0;
+        goto err_out1;
+    } else if (opts.show_version) {
+        printf("FUSE library version %s\n", fuse_pkgversion());
+        fuse_lowlevel_version();
+        ret = 0;
+        goto err_out1;
+    }
+
+    if(opts.mountpoint == NULL) {
+        printf("usage: %s [options] <mountpoint>\n", argv[0]);
+        printf("       %s --help\n", argv[0]);
+        ret = 1;
+        goto err_out1;
+    }
+
+    se = fuse_session_new(&args, &hello_ll_oper,
+                          sizeof(hello_ll_oper), NULL);
+    if (se == NULL)
+        goto err_out1;
+
+    if (fuse_set_signal_handlers(se) != 0)
+        goto err_out2;
+
+    if (fuse_session_mount(se, opts.mountpoint) != 0)
+        goto err_out3;
+
+    fuse_daemonize(opts.foreground);
+
+    /* Block until ctrl+c or fusermount -u */
+    if (opts.singlethread)
+    {
+        ret = fuse_session_loop(se);
+        printf("SingleThread\n");
+    }
+    else {
+        printf("MultiThread\n");
+        config.clone_fd = opts.clone_fd;
+        config.max_idle_threads = opts.max_idle_threads;
+        ret = fuse_session_loop_mt(se, &config);
+    }
+
+    fuse_session_unmount(se);
+    err_out3:
+    fuse_remove_signal_handlers(se);
+    err_out2:
+    fuse_session_destroy(se);
+    err_out1:
+    free(opts.mountpoint);
+    fuse_opt_free_args(&args);
+
+    return ret ? 1 : 0;
 }
