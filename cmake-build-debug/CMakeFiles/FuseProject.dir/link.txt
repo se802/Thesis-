@@ -1,0 +1,1 @@
+/usr/bin/cc  -Wall -g CMakeFiles/FuseProject.dir/main.c.o CMakeFiles/FuseProject.dir/main2.c.o -o FuseProject  -lfuse3 -lpthread 

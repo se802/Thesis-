@@ -1,4 +1,4 @@
-# Install script for directory: /home/stelios/CLionProjects/FuseProject
+# Install script for directory: /home/csdeptucy/CLionProjects/Thesis-
 
 # Set the install prefix
 if(NOT DEFINED CMAKE_INSTALL_PREFIX)
@@ -50,5 +50,5 @@ endif()
 
 string(REPLACE ";" "\n" CMAKE_INSTALL_MANIFEST_CONTENT
        "${CMAKE_INSTALL_MANIFEST_FILES}")
-file(WRITE "/home/stelios/CLionProjects/FuseProject/cmake-build-debug/${CMAKE_INSTALL_MANIFEST}"
+file(WRITE "/home/csdeptucy/CLionProjects/Thesis-/cmake-build-debug/${CMAKE_INSTALL_MANIFEST}"
      "${CMAKE_INSTALL_MANIFEST_CONTENT}")

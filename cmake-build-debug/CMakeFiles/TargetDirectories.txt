@@ -1,3 +1,3 @@
-/home/stelios/CLionProjects/FuseProject/cmake-build-debug/CMakeFiles/FuseProject.dir
-/home/stelios/CLionProjects/FuseProject/cmake-build-debug/CMakeFiles/edit_cache.dir
-/home/stelios/CLionProjects/FuseProject/cmake-build-debug/CMakeFiles/rebuild_cache.dir
+/home/csdeptucy/CLionProjects/Thesis-/cmake-build-debug/CMakeFiles/FuseProject.dir
+/home/csdeptucy/CLionProjects/Thesis-/cmake-build-debug/CMakeFiles/edit_cache.dir
+/home/csdeptucy/CLionProjects/Thesis-/cmake-build-debug/CMakeFiles/rebuild_cache.dir
