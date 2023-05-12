@@ -13,6 +13,8 @@
 #include <fuse3/fuse_lowlevel.h>
 #include "fuse3/fuse.h"
 
+
+#include "dirent.h"
 #include "pthread.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,7 +31,7 @@
 
 using namespace verona::cpp;
 
-static  char hello_str[50] = "Hello World!!!!\n";
+static  char hello_str[5000] = "Hello World Hello World Hello World Hello World Hello World Hello World Hello World!!!!\n";
 static  char hello_name[50] = "hello";
 
 static  char str2[50] = "str2\n";
@@ -83,10 +85,22 @@ static int hello_stat(fuse_ino_t ino, struct stat *stbuf)
             stbuf->st_nlink = 1;
             stbuf->st_size = strlen(str4);
             break;
+        case 99:
+            stbuf->st_mode = S_IFREG | 0777;
+            stbuf->st_nlink = 1;
+            stbuf->st_size = strlen(str4);
+            break;
         default:
             return -1;
     }
     return 0;
+}
+
+
+static void lo_forget(fuse_req_t req, fuse_ino_t ino, uint64_t nlookup)
+{
+    //lo_forget_one(req, ino, nlookup);
+    fuse_reply_none(req);
 }
 
 static void hello_ll_getattr(fuse_req_t req, fuse_ino_t ino,struct fuse_file_info *fi)
@@ -106,11 +120,19 @@ static void hello_ll_getattr(fuse_req_t req, fuse_ino_t ino,struct fuse_file_inf
         fuse_reply_attr(req, &stbuf, 1.0);
 }
 
+
 static void hello_ll_lookup(fuse_req_t req, fuse_ino_t parent, const char *name)
 {
     const struct fuse_ctx  *ctx= fuse_req_ctx(req);
 
+
     printf("in lookup looking for inode of %s with parent %ld\n",name,parent);
+    if(strcmp(name,"str5")==0)
+    {
+
+        fuse_reply_err(req,ENOENT);
+        return ;
+    }
     //printf("Thread %lu\n",pthread_self());
     struct fuse_entry_param e;
 
@@ -204,7 +226,10 @@ static void hello_ll_readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
 
     int pid = getpid();
     pthread_t tid = pthread_self();
-    printf("in readdir Process: %d, Thread: %lu for inode %lu\n",pid,tid,ino);
+    when() << [=](){
+      printf("in readdir Process: %d, Thread: %lu for inode %lu\n",pid,tid,ino);
+    };
+
     //while (1);
     //printf("Thread %lu\n",pthread_self());
     (void) fi;
@@ -242,6 +267,8 @@ static void hello_ll_readdir(fuse_req_t req, fuse_ino_t ino, size_t size,
     }
 }
 
+
+
 static void hello_ll_open(fuse_req_t req, fuse_ino_t ino,
                           struct fuse_file_info *fi)
 {
@@ -256,7 +283,7 @@ static void hello_ll_open(fuse_req_t req, fuse_ino_t ino,
 static void hello_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size,
                           off_t off, struct fuse_file_info *fi)
 {
-    printf("in read %d \n",ino);
+    printf("in read %d with offset %d\n",ino,off);
     //while (1);
     //printf("Thread %lu\n",pthread_self());
     (void) fi;
@@ -365,14 +392,45 @@ static void lo_init(void *userdata,
 
 
 
+static void lo_rename(fuse_req_t req, fuse_ino_t parent, const char *name,
+                      fuse_ino_t newparent, const char *newname,
+                      unsigned int flags)
+{
+    printf("parent %lu and newpart %lu\n",parent,newparent);
+    printf("old name: %s new name: %s\n",name,newname);
+    fuse_reply_err(req,0);
+}
+
+
+static void lo_link(fuse_req_t req, fuse_ino_t ino, fuse_ino_t parent,
+                    const char *name)
+{
+    int res;
+
+    struct fuse_entry_param e;
+
+
+    memset(&e, 0, sizeof(e));
+    e.ino = 2;
+    e.attr_timeout = 1.0;
+    e.entry_timeout = 1.0;
+    hello_stat(e.ino, &e.attr);
+    fuse_reply_entry(req, &e);
+    return;
+
+
+}
+
+
 static const struct fuse_lowlevel_ops hello_ll_oper = {
         .init       = lo_init,
-
         .lookup		= hello_ll_lookup,
+
+        .forget   = lo_forget,
         .getattr	= hello_ll_getattr,
-
+        .rename = lo_rename,
+        .link     = lo_link,
         .open		= hello_ll_open,
-
         .read		= hello_ll_read,
         .write      = hello_ll_write,
         .readdir	= hello_ll_readdir,
@@ -381,7 +439,6 @@ static const struct fuse_lowlevel_ops hello_ll_oper = {
 struct my_thread_data {
     struct fuse_session *se;
     struct fuse_buf *fbuf;
-    int test =5;
 };
 
 
@@ -399,9 +456,9 @@ void *my_thread_function(void *arg) {
 
     // process the FUSE request
     fuse_session_process_buf(se, fbuf);
-    //free(fbuf->mem);
-    //free(fbuf);
-    //free(data);
+    free(fbuf->mem);
+    free(fbuf);
+    free(data);
 
     return NULL;
 }
@@ -411,12 +468,13 @@ void *my_thread_function(void *arg) {
 class ThreadCown
 {
   public:
+    pthread_t *thread_id;
     void *(*start_routine)(void *);
     void *arg;
     int test =5;
 
-    ThreadCown(void *(*_start_routine)(void *), void *_arg,int val)
-    : start_routine(_start_routine), arg(_arg),test(val) {}
+    ThreadCown(pthread_t *_thread_id, void *(*_start_routine)(void *), void *_arg)
+    : thread_id(_thread_id), start_routine(_start_routine), arg(_arg) {}
 };
 
 class Body
@@ -431,77 +489,147 @@ class Body
 using namespace verona::cpp;
 
 
-
 void create_thread(pthread_t *thread_id, void *(*start_routine)(void *), void *arg)
 {
-    //pthread_create(thread_id,NULL,start_routine,arg);
-    //return ;
     // Create a cown for the operation
-    auto thread_cown = make_cown<ThreadCown>( start_routine, arg,35);
+    auto thread_cown = make_cown<ThreadCown>(thread_id, start_routine, arg);
 
     // Execute the operation when thread_cown is available
     when(thread_cown) << [](acquired_cown<ThreadCown> thread_cown) mutable
     {
-      pthread_t tid;
-      printf("Num %d:\n", thread_cown->test);
-      pthread_create(&tid, NULL, thread_cown->start_routine, thread_cown->arg);
+      thread_cown->test = 10;
+      printf("Num %d:\n", thread_cown->test = 10 );
+      pthread_create(thread_cown->thread_id, NULL, thread_cown->start_routine, thread_cown->arg);
     };
 }
 
 
-void my_fuse_session_loop(struct fuse_session *se,SystematicTestHarness &harness) {
-
-    int res = 0;
-    while (!fuse_session_exited(se)) {
-        struct fuse_buf *fbuf = (struct fuse_buf *) malloc(sizeof(struct fuse_buf));
-        fbuf->mem = NULL;
-        if (fbuf == NULL) {
-            // handle allocation failure
-            break;
-        }
-        //printf("Before receive_buf %lu \n",pthread_self());
-        res = fuse_session_receive_buf(se, fbuf);
-
-        if (res == -EINTR) {
-            free(fbuf->mem);
-            free(fbuf);
-            continue;
-        }
-        if (res <= 0) {
-            free(fbuf->mem);
-            free(fbuf);
-            break;
-        }
 
 
 
-        // allocate memory for the thread data structure and set its fields
-        struct my_thread_data *data = (struct my_thread_data *) malloc(sizeof(struct my_thread_data));
-        data->se = se;
-        data->fbuf = fbuf;
-        data->test = 25;
 
-        // create a new thread and pass the `data` pointer to it
-        pthread_t thread_id;
 
-        //create_thread(&thread_id, my_thread_function,(void *)data);
-        harness.run(create_thread,&thread_id, my_thread_function,(void *)data);
+
+
+
+struct ExternalSource;
+
+
+struct Poller : VCown<Poller>
+{
+    std::shared_ptr<ExternalSource> es;
+};
+
+struct ExternalSource
+{
+    Poller* p;
+    std::atomic<bool> notifications_on;
+    Notification* n;
+
+    ExternalSource(Poller* p_) : p(p_), notifications_on(false)
+    {
+        Cown::acquire(p);
     }
 
-    if (res > 0) {
-        // No error, just the length of the most recently read request
-        res = 0;
+    ~ExternalSource()
+    {
+        Logging::cout() << "~ExternalSource" << Logging::endl;
     }
-    //if(se->error != 0)
-    //     res = se->error;
-    // fuse_session_reset(se);
-    //printf("exiting");
-    //return res;
+    void test(){
+        printf("test\n");
+    }
+
+    void my_fuse_session_loop(struct fuse_session *se) {
+
+        int res = 0;
+        while (!fuse_session_exited(se)) {
+            struct fuse_buf *fbuf = (struct fuse_buf *) malloc(sizeof(struct fuse_buf));
+            fbuf->mem = NULL;
+            if (fbuf == NULL) {
+              // handle allocation failure
+              break;
+            }
+            //printf("Before receive_buf %lu \n",pthread_self());
+            res = fuse_session_receive_buf(se, fbuf);
+
+            if (res == -EINTR) {
+              free(fbuf->mem);
+              free(fbuf);
+              continue;
+            }
+            if (res <= 0) {
+              free(fbuf->mem);
+              free(fbuf);
+              break;
+            }
+
+
+
+            // allocate memory for the thread data structure and set its fields
+            struct my_thread_data *data = (struct my_thread_data *) malloc(sizeof(struct my_thread_data));
+            data->se = se;
+            data->fbuf = fbuf;
+
+
+            // create a new thread and pass the `data` pointer to it
+            pthread_t thread_id;
+            //pthread_create(&thread_id, NULL, my_thread_function, data);
+
+            when() << [&]() {
+              pthread_create(&thread_id, NULL, my_thread_function, data);
+            };
+
+        }
+
+        if (res > 0) {
+            // No error, just the length of the most recently read request
+            res = 0;
+        }
+        //if(se->error != 0)
+        //     res = se->error;
+        // fuse_session_reset(se);
+        //printf("exiting");
+        //return res;
+    }
+
+
+};
+
+
+
+void test(SystematicTestHarness* harness,struct fuse_session *se)
+{
+    auto& alloc = ThreadAlloc::get();
+    auto* p = new (alloc) Poller();
+    auto es = std::make_shared<ExternalSource>(p);
+
+
+    schedule_lambda<YesTransfer>(p, [=]() {
+      // Start IO Thread
+      Scheduler::add_external_event_source();
+      harness->external_thread([=]() {   es->my_fuse_session_loop(se); });
+    });
+}
+
+
+
+void test(){
+    when() << [](){
+      bool done = false;
+      when() << [&](){
+        sleep(5);
+        printf("hey from 1");
+        done = true;
+      };
+      while (!done);
+      printf("hey from 2\n");
+    };
 }
 
 int main(int argc, char *argv[])
 {
     SystematicTestHarness harness(argc, argv);
+    auto x = make_cown<Body>();
     int pid = getpid();
     printf("Process id %d\n",pid);
     srand(time(NULL));
@@ -561,7 +689,10 @@ int main(int argc, char *argv[])
     printf("Single Threaded\n");
     config.clone_fd = opts.clone_fd;
     config.max_idle_threads = opts.max_idle_threads;
-    my_fuse_session_loop(se,harness);
+
+
+
+    harness.run(test,&harness,se);
 
 
     //SystematicTestHarness harness(argc, argv);
