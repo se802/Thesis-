@@ -8,27 +8,36 @@
  *     ./hello_ll -f /tmp/ssfs
  */
 
-#define FUSE_USE_VERSION 34
+//TODO: SUBMIT REPORT, Fix leaks in all callbacks
+// Fixed: read,write,getattr
+//FIXME: 1. Changed block size (can affect performance)
+//       2. Changed fuse_session_loop, dont use when to process_buf
+//       3. Changed libfuse, struct fuse_req now contains a pointer to buf->mem which was leading to leak
+//       4. changed fio to use multiple processes to write to same file --> improved bw https://www.flamingbytes.com/blog/fio-benchmark-on-multiple-files/
+
 
 #include "main.h"
 
 #include "dirent.h"
-#include "fuse3/fuse.h"
+
 #include "fuse3/fuse_opt.h"
 #include "pthread.h"
 
-#include <assert.h>
-#include <cpp/when.h>
-#include <debug/harness.h>
-#include <errno.h>
+#include <cassert>
+
+#include <cerrno>
 #include <fcntl.h>
-#include <fuse3/fuse_lowlevel.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <unistd.h>
 
-#define BLOCK_SIZE 32ul
+#define BLOCK_SIZE 32768
+
+  //32768
+
+
 
 // -----------------------------------------------------------
 // ------------------------- Definitions ---------------------
@@ -37,20 +46,42 @@ struct ExternalSource;
 
 struct FileSystem;
 
-struct Block {
-  Block(size_t size)
-  : size(size)
-    , buf(new char[size]) {}
 
+struct Block {
+  explicit Block(size_t size,int block_number)
+  : size(size),block_number(block_number)
+    , buf(new char[size]) {
+    //memset(buf.get(),0,size);
+  }
+
+  int block_number = -1;
   size_t size;
   std::unique_ptr<char[]> buf;
 
-  void write(char* data, uint64_t bytes_to_write, uint64_t block_offset,uint64_t bytes_written);
+  void write(const char* data, uint64_t bytes_to_write, uint64_t block_offset,uint64_t bytes_written) const;
+  void read(char* data, uint64_t bytes_to_read, uint64_t block_offset,uint64_t bytes_read) const;
 };
 
-void Block::write(char* data, uint64_t bytes_to_write, uint64_t block_offset,uint64_t bytes_written)
+
+
+void Block::write(const char* data, uint64_t bytes_to_write, uint64_t block_offset,uint64_t bytes_written) const
 {
   memcpy(buf.get()+block_offset,data+bytes_written,bytes_to_write);
+}
+
+void Block::read(char* data, uint64_t bytes_to_read, uint64_t block_offset, uint64_t bytes_read) const
+{
+  memcpy(data+bytes_read, buf.get()+block_offset, bytes_to_read);
+
+  // Create a new string with the copied data
+  //char *copied_string = (char*)malloc((bytes_to_read + 1) * sizeof(char));
+  //memcpy(copied_string, buf.get()+block_offset, bytes_to_read);
+  //copied_string[bytes_to_read] = '\0';  // Null-terminate the new string
+  //
+  //printf("Bytes %lu, Copied substring: '%s'\n", bytes_to_read,copied_string);
+  //
+  //free(copied_string);  // Don't forget to free the allocated memory
+
 }
 
 class Inode {
@@ -61,11 +92,10 @@ public:
     uid_t uid,
     gid_t gid,
     blksize_t blksize,
-    mode_t mode,
     FileSystem* fs)
   : ino(ino)
     , fs_(fs) {
-    memset(&i_st, 0, sizeof(i_st));
+    memset(&i_st, 0, sizeof(struct stat));
     i_st.st_ino = ino;
     i_st.st_atime = time;
     i_st.st_mtime = time;
@@ -73,6 +103,9 @@ public:
     i_st.st_uid = uid;
     i_st.st_gid = gid;
     i_st.st_blksize = blksize;
+
+
+
   }
 
   virtual ~Inode() = 0;
@@ -83,33 +116,47 @@ public:
 
   bool is_regular() const;
   bool is_directory() const;
-  bool is_symlink() const;
+  //bool is_symlink() const;
 
   long int krefs = 0;
 
 protected:
-  FileSystem* fs_;
+  [[maybe_unused]]FileSystem* fs_;
 };
 
 class RegInode : public Inode {
 public:
   RegInode(
-    fuse_ino_t ino,
+    fuse_ino_t &ino,
     time_t time,
     uid_t uid,
     gid_t gid,
     blksize_t blksize,
     mode_t mode,
     FileSystem* fs)
-  : Inode(ino, time, uid, gid, blksize, mode, fs) {
+  : Inode(reinterpret_cast<fuse_ino_t >(this), time, uid, gid, blksize,  fs) {
     i_st.st_nlink = 1;
+    i_st.st_size = 0;
     i_st.st_mode = S_IFREG | mode;
+    ino = reinterpret_cast<fuse_ino_t >(this);
   }
 
-  ~RegInode();
+  // Default constructor
+  RegInode() : Inode(-1, -1, -1, -1, -1, nullptr) {
+    // Initialize other members if needed
+    i_st.st_nlink = -1;
+    i_st.st_size = -1;
+    i_st.st_mode = S_IFREG;
+    fake = true;
+  }
 
-  void write(char *buf,size_t size,off_t offset,fuse_req_t req);
+  bool fake = false;
 
+  ~RegInode() override;
+
+  void write(const char *buf,size_t size,off_t offset,fuse_req_t req, uint64_t &avail_bytes, int *ptr);
+  int read(size_t size,off_t offset,fuse_req_t req);
+  int allocate_space(uint64_t blockID, size_t &avail_bytes);
   std::map<off_t, cown_ptr<Block>> data_blocks;
 };
 
@@ -119,63 +166,164 @@ public:
   u_int64_t count = 0;
 };
 
-// Someone acquires a regular inode and writes through it
-// when (regInode) << []() { ... regInode.write() ... }
-void RegInode::write(char* buf, size_t size, off_t offset,fuse_req_t req)
+int RegInode::allocate_space(uint64_t blockID, size_t &avail_bytes)
 {
+  if (avail_bytes < BLOCK_SIZE) return -ENOSPC;
+  avail_bytes -= BLOCK_SIZE;
+  data_blocks.emplace(blockID, make_cown<Block>(BLOCK_SIZE,blockID));
+  return 0;
+}
+
+//FIXME: write never returns an error
+void RegInode::write(const char* buf, size_t size, off_t offset,fuse_req_t req,size_t &avail_bytes, int *ptr)
+{
+  //if (count ==1)
+  //  printf("aaaaaa\n");
+
+  auto now = std::time(nullptr);
+  i_st.st_ctime = now;
+  i_st.st_mtime = now;
+
+
   // Calculate the block ID based on the offset
   u_int64_t bytes_written = 0;
   u_int64_t blockId = offset/ BLOCK_SIZE;
   u_int64_t block_offset;
   u_int64_t remaining_size = size;
 
-  // FIXME: HOW TO FREE MEMORY FROM A COWN OBJECT?
+  if(bytes_written> 100000000000000)
+    printf("aaaa");
+
   auto counter = make_cown<Counter>();
 
   while (remaining_size>0)
   {
+    //printf("bytes written: %ud\n",bytes_written);
     blockId = (offset + bytes_written) / BLOCK_SIZE;
     block_offset = (offset + bytes_written) % BLOCK_SIZE;
 
-
     if (data_blocks.find(blockId) == data_blocks.end())
     {
-      // Since only one can hold reg inode space can be safely allocated for that inode
-      data_blocks.emplace(blockId, make_cown<Block>(BLOCK_SIZE));
-      // FIXME AVAILABLE SPACE COUNTER SHOULD BE A COWN
-      // FIXME: BEFORE ALLOCATING BLOCK CHECK THAT THERE IS AVAILABLE SPACE AND RETURN ERROR
-      // int ret = ...
-      // fuse_reply_err(req, -ret);
+      data_blocks.emplace(blockId, make_cown<Block>(BLOCK_SIZE,blockId));
+      //printf("block id %lu -----> new_Block\n",blockId);
+
+      int ret = allocate_space(blockId,avail_bytes);
+      //if (ret){
+      //  fuse_reply_err(req,-ret);
+      //  exit(-99);
+      //}
+
+      i_st.st_blocks = std::min(i_st.st_blocks+1,(__blkcnt_t)data_blocks.size());
     }
 
     size_t bytes_to_write = std::min(BLOCK_SIZE - block_offset, remaining_size);
 
-    // TODO: Last time we said that we could have multiple blocks within a when,
-    //  but the only way to do this would be to collect all cowns together somehow, but how?
-    when(data_blocks.at(blockId),counter) << [=] (acquired_cown<Block> blk,auto ctr){
+
+    cown_ptr<Block> blk = data_blocks.at(blockId);
+    when(blk) << [=] (acquired_cown<Block> blk ){
       blk->write(buf,bytes_to_write,block_offset,bytes_written);
-      //memcpy(data_blocks.at(blockId).buf.get()+block_offset,buf+bytes_written,bytes_to_write);
-      ctr->count += bytes_to_write;
+      when(counter) << [=](auto ctr){
+        //printf("Increasing ctr->count by %zu\n",bytes_to_write);
+        ctr->count += bytes_to_write;
+        if (ctr->count == size) {
+          off_t var = offset+size;
+          i_st.st_size = std::max(i_st.st_size, var);
+          // All writes have completed, send the reply to the kernel
+          //printf("Written %lu\n",ctr->count);
+          fuse_reply_write(req, ctr->count);
+          free(ptr);
+
+        }
+      };
+
     };
+    uint64_t prev = bytes_written;
     bytes_written += bytes_to_write;
     remaining_size -= bytes_to_write;
+    if(bytes_written> 100000000000000)
+      printf("aaaa");
   }
-
-  // TODO: PROBLEM IS THAT WE HAVE TO REPLY TO THE KERNEL WHEN THE FOR LOOP FINISHES
-  //  USING THIS HACK I MANAGED TO SERIALIZE THE EXECUTION OF THE LOOP, IS THAT FINE?
-  when(counter) << [=] (acquired_cown<Counter> ctr){
-    if (ctr->count == size) {
-      // All writes have completed, send the reply to the kernel
-      fuse_reply_write(req, ctr->count);
-    }
-  };
-
-  //if (ret >= 0)
-  //  fuse_reply_write(req, ret);
-  //else
-  //  fuse_reply_err(req, -ret);
-
 }
+
+static int reply_buf_limited(fuse_req_t req, const char *buf, size_t bufsize,
+                             off_t off, size_t maxsize)
+{
+  if (off < bufsize)
+    return fuse_reply_buf(req, buf + off,
+                          std::min(bufsize - off, maxsize));
+  else
+    return fuse_reply_buf(req, NULL, 0);
+}
+
+
+
+
+//FIXME: What if someone does lseek(fd,1000,SEEK_CUR) --> write(fd,"a",1), and someone tries to read from offset 0? what will it return
+int RegInode::read( size_t size, off_t offset, fuse_req_t req)
+{
+  auto time = std::time(nullptr);
+
+  // Calculate the block ID based on the offset
+  u_int64_t bytes_read = 0;
+  u_int64_t blockId;
+  u_int64_t block_offset;
+  long remaining_size = std::min((long)size, (long)i_st.st_size -offset );
+  remaining_size = std::max(remaining_size,0l);
+
+  if(remaining_size == 0)
+    fuse_reply_buf(req, NULL, 0);
+
+  u_int64_t total = remaining_size;
+
+  char *buf = static_cast<char*>(malloc(sizeof(char) * remaining_size));
+  //memset(buf,0,remaining_size);
+
+  auto counter = make_cown<Counter>();
+
+
+
+  //printf("In reg inode read, time: %d and remaining size: %d\n",time,remaining_size);
+
+  while (remaining_size > 0)
+  {
+    blockId = (offset + bytes_read) / BLOCK_SIZE;
+    block_offset = (offset + bytes_read) % BLOCK_SIZE;
+
+    if(data_blocks.find(blockId) == data_blocks.end()){
+      bytes_read += BLOCK_SIZE;
+      remaining_size -= BLOCK_SIZE;
+      continue ;
+      std::cout << "Exiting in read" << std::endl;
+      exit(-99);
+    }
+    cown_ptr<Block> blk = data_blocks.at(blockId);
+    size_t bytes_to_read = std::min((long)(BLOCK_SIZE - block_offset), remaining_size);
+    //printf("offset: %ld, bytes_read %lu , size:%zud, bytes_to_read %lu, file_size: %ld, remaining size %ld\n",offset, bytes_read,size,bytes_to_read,i_st.st_size,remaining_size);
+
+    when(blk) << [=] (acquired_cown<Block> blk){
+      blk->read(buf, bytes_to_read, block_offset, bytes_read);
+
+      when(counter) << [=](auto ctr){
+        ctr->count += bytes_to_read;
+        //printf("ctr: %d, total: %d\n",ctr->count,total);
+        if(ctr->count == total)
+        {
+          auto time = std::time(nullptr);
+          //printf("replying kernel: bytes %d, time: %d\n\n",ctr->count,time);
+          //printf("total %d , req: %d buf: %s \n",total,req,buf);
+          reply_read(ctr->count,req,buf);
+          //reply_buf_limited(req,buf,total,offset,size);
+        }
+      };
+    };
+    bytes_read += bytes_to_read;
+    remaining_size -= bytes_to_read;
+  }
+  //printf("offset: %ld, bytes_read %lu, size:%zud, bytes_read %lu, file_size: %ld, remaining size %ld\n",offset,bytes_read ,size,bytes_read,i_st.st_size,remaining_size);
+}
+
+
+
 
 
 class DirInode : public Inode {
@@ -183,22 +331,36 @@ public:
   typedef std::map<std::string, uint64_t> dir_t;
 
   DirInode(
-    fuse_ino_t ino,
+    fuse_ino_t &ino,
     time_t time,
     uid_t uid,
     gid_t gid,
     blksize_t blksize,
     mode_t mode,
     FileSystem* fs)
-  : Inode(ino, time, uid, gid, blksize, mode, fs) {
+  : Inode(ino==1? 1: reinterpret_cast<fuse_ino_t >(this), time, uid, gid, blksize, fs) {
     i_st.st_nlink = 2;
     i_st.st_blocks = 1;
     i_st.st_mode = S_IFDIR | mode;
+    ino = reinterpret_cast<fuse_ino_t >(this);
   }
+
+  // Default constructor
+  DirInode() : Inode(-1, -1, -1, -1, -1, nullptr) {
+    // Initialize other members if needed
+    i_st.st_nlink  = -1;
+    i_st.st_blocks = -1;
+    i_st.st_mode   = -1;
+    fake = true;
+  }
+
+  bool fake = false;
 
   ~DirInode();
 
   dir_t dentries;
+
+
 };
 
 
@@ -206,7 +368,7 @@ bool Inode::is_regular() const { return i_st.st_mode & S_IFREG; }
 
 bool Inode::is_directory() const { return i_st.st_mode & S_IFDIR; }
 
-bool Inode::is_symlink() const { return i_st.st_mode & S_IFLNK; }
+//bool Inode::is_symlink() const { return i_st.st_mode & S_IFLNK; }
 
 
 Inode::~Inode() {
@@ -229,10 +391,14 @@ struct FileHandle {
   : in(in)
     , flags(flags) {}
 };
-// TODO: READ,WRITE,RENAME,UNLINK,RELEASE
+
+
+// TODO: RENAME,RELEASE,FORGET
+// DONE:  READ,WRITE,RMDIR,UNLINK,
+
 class FileSystem : public filesystem_base{
 public:
-  FileSystem(size_t size);
+  explicit FileSystem(size_t size);
   FileSystem(const FileSystem& other) = delete;
   FileSystem(FileSystem&& other) = delete;
   ~FileSystem() = default;
@@ -254,38 +420,54 @@ public:
 
   // file handle operation
 public:
-  int create(fuse_ino_t parent_ino,const std::string& name,mode_t mode,int flags,uid_t uid,gid_t gid, fuse_req_t req,struct fuse_file_info* fi);
-  int getattr(fuse_ino_t ino,  uid_t uid, gid_t gid, fuse_req_t req);
-  ssize_t readdir(fuse_req_t req, fuse_ino_t ino,  size_t bufsize, off_t off);
-  int mkdir(fuse_ino_t parent_ino,const std::string& name,mode_t mode, uid_t uid,gid_t gid, fuse_req_t req);
+  int create(fuse_ino_t parent_ino,const std::string& name,mode_t mode,int flags,uid_t uid,gid_t gid, fuse_req_t req,struct fuse_file_info* fi) override;
+  int getattr(fuse_ino_t ino,  uid_t uid, gid_t gid, fuse_req_t req, int *ptr) override;
+  ssize_t readdir(fuse_req_t req, fuse_ino_t ino,  size_t bufsize, off_t off) override;
+  int mkdir(fuse_ino_t parent_ino,const std::string& name,mode_t mode, uid_t uid,gid_t gid, fuse_req_t req) override;
   //int mknod(fuse_ino_t parent_ino,const std::string& name,mode_t mode,dev_t rdev,struct stat* st,uid_t uid,gid_t gid);
-  int access(fuse_ino_t ino, int mask, uid_t uid, gid_t gid,fuse_req_t req);
-  int setattr(fuse_ino_t ino,FileHandle* fh,struct stat* attr,int to_set,uid_t uid,gid_t gid,fuse_req_t req);
-  int lookup(fuse_ino_t parent_ino, const std::string& name,fuse_req_t req);
-  void init(void *userdata,struct fuse_conn_info *conn);
-  int open(fuse_ino_t ino, int flags, FileHandle** fhp, uid_t uid, gid_t gid,  struct fuse_file_info* fi,fuse_req_t req);
-  ssize_t write(FileHandle* fh, const char * buf, size_t size, off_t off, struct fuse_file_info *fi,fuse_req_t req);
+  int access(fuse_ino_t ino, int mask, uid_t uid, gid_t gid,fuse_req_t req) override;
+  int setattr(fuse_ino_t ino,FileHandle* fh,struct stat* attr,int to_set,uid_t uid,gid_t gid,fuse_req_t req) override;
+  int lookup(fuse_ino_t parent_ino, const std::string& name,fuse_req_t req) override;
+  void init(void *userdata,struct fuse_conn_info *conn) override;
+  int open(fuse_ino_t ino, int flags, FileHandle** fhp, uid_t uid, gid_t gid,  struct fuse_file_info* fi,fuse_req_t req) override;
+  ssize_t write(FileHandle* fh, const char * buf, size_t size, off_t off, struct fuse_file_info *fi,fuse_req_t req,int * ptr) override;
+  ssize_t read(FileHandle* fh, off_t offset, size_t size,fuse_req_t req) override;
+  int unlink(fuse_ino_t parent_ino, const std::string& name, uid_t uid, gid_t gid,fuse_req_t req);
+  int rmdir(fuse_ino_t parent_ino, const std::string& name, uid_t uid, gid_t gid,fuse_req_t req);
+  void forget(fuse_ino_t ino, long unsigned nlookup,fuse_req_t req);
+  int rename(fuse_ino_t acq_old_parent_in,const std::string& oldname,fuse_ino_t newparent_ino,const std::string& dupl_reg_in,uid_t uid,gid_t dupl_dir_in,fuse_req_t req);
+  int opendir(fuse_ino_t ino, int flags, uid_t uid, gid_t gid,fuse_req_t req,struct fuse_file_info *fi);
   // helper functions
 private:
+
+  void free_space(acquired_cown<Block> &blk);
+  int truncate(acquired_cown<RegInode> &in, off_t newsize, uid_t uid, gid_t gid);
+
   void add_inode(cown_ptr<DirInode> inode);
   void add_inode(cown_ptr<RegInode> inode);
-  ssize_t write(const std::shared_ptr<RegInode>& in,off_t offset,size_t size,const char* buf);
 
-  void get_inode(cown_ptr<RegInode> inode_cown, acquired_cown<RegInode> &acq_inode,  acquired_cown<std::unordered_map<fuse_ino_t, cown_ptr<RegInode>>> &regular_inode_table);
-  void get_inode(cown_ptr<DirInode> inode_cown, acquired_cown<DirInode> &acq_inode,  acquired_cown<std::unordered_map<fuse_ino_t, cown_ptr<DirInode>>> &dir_inode_table);
+  static void get_inode(const cown_ptr<RegInode>& inode_cown, acquired_cown<RegInode> &acq_inode,  acquired_cown<std::unordered_map<fuse_ino_t, cown_ptr<RegInode>>> &regular_inode_table);
+  static void get_inode(const cown_ptr<DirInode>& in_cown, acquired_cown<DirInode> &acq_inode,  acquired_cown<std::unordered_map<fuse_ino_t, cown_ptr<DirInode>>> &dir_inode_table);
+
+  static void put_inode(const cown_ptr<RegInode>& inode_cown, acquired_cown<RegInode> &acq_inode,  acquired_cown<std::unordered_map<fuse_ino_t, cown_ptr<RegInode>>> &regular_inode_table);
+  static void put_inode(const cown_ptr<DirInode>& in_cown, acquired_cown<DirInode> &acq_inode,  acquired_cown<std::unordered_map<fuse_ino_t, cown_ptr<DirInode>>> &dir_inode_table);
+
+
   // private fields;
   cown_ptr<std::unordered_map<fuse_ino_t, cown_ptr<RegInode>>> regular_inode_table = make_cown<std::unordered_map<fuse_ino_t, cown_ptr<RegInode>>>();
   cown_ptr<std::unordered_map<fuse_ino_t, cown_ptr<DirInode>>> dir_inode_table = make_cown<std::unordered_map<fuse_ino_t, cown_ptr<DirInode>>>();
 
 private:
   int access(struct stat st, int mask, uid_t uid, gid_t gid);
-  void init_stat(fuse_ino_t ino, time_t time, uid_t uid, gid_t gid, blksize_t blksize, mode_t mode,struct stat *i_st,bool is_regular);
+  static void init_stat(fuse_ino_t ino, time_t time, uid_t uid, gid_t gid, blksize_t blksize, mode_t mode,struct stat *i_st,bool is_regular);
 
 private:
   std::atomic<fuse_ino_t> next_ino_;
+  //FIXME, SHOULD BE ATOMIC
   size_t avail_bytes_;
   struct statvfs stat;
   cown_ptr<DirInode> root;
+
 };
 
 // Implementation
@@ -294,7 +476,7 @@ private:
 
 void FileSystem::init_stat(fuse_ino_t ino, time_t time, uid_t uid, gid_t gid, blksize_t blksize, mode_t mode,struct stat *i_st,bool is_regular)
 {
-  memset(i_st, 0, sizeof(i_st));
+  memset(i_st, 0, sizeof(struct stat));
   i_st->st_ino = ino;
   i_st->st_atime = time;
   i_st->st_mtime = time;
@@ -333,7 +515,7 @@ void FileSystem::add_inode(cown_ptr<RegInode> ino)
   };
 }
 
-void FileSystem::get_inode(cown_ptr<RegInode> inode_cown, acquired_cown<RegInode> &acq_inode,  acquired_cown<std::unordered_map<fuse_ino_t, cown_ptr<RegInode>>> &regular_inode_table)
+void FileSystem::get_inode(const cown_ptr<RegInode>& inode_cown, acquired_cown<RegInode> &acq_inode,  acquired_cown<std::unordered_map<fuse_ino_t, cown_ptr<RegInode>>> &regular_inode_table)
 {
   acq_inode->krefs++;
   auto res = regular_inode_table->emplace(acq_inode->ino, inode_cown);
@@ -344,10 +526,10 @@ void FileSystem::get_inode(cown_ptr<RegInode> inode_cown, acquired_cown<RegInode
   }
 }
 
-void FileSystem::get_inode(cown_ptr<DirInode> inode_cown, acquired_cown<DirInode> &acq_inode,  acquired_cown<std::unordered_map<fuse_ino_t, cown_ptr<DirInode>>> &dir_inode_table)
+void FileSystem::get_inode(const cown_ptr<DirInode>& in_cown, acquired_cown<DirInode> &acq_inode,  acquired_cown<std::unordered_map<fuse_ino_t, cown_ptr<DirInode>>> &dir_inode_table)
 {
   acq_inode->krefs++;
-  auto res = dir_inode_table->emplace(acq_inode->ino, inode_cown);
+  auto res = dir_inode_table->emplace(acq_inode->ino, in_cown);
   if (!res.second) {
     assert(acq_inode->krefs > 0);
   } else {
@@ -360,17 +542,17 @@ FileSystem::FileSystem(size_t size): next_ino_(FUSE_ROOT_ID) {
   auto now = std::time(nullptr);
 
   auto node_id = next_ino_++;
-  printf("node id is :%lu\n",node_id);
+  //printf("node id is :%lu\n",node_id);
 
-  root = make_cown<DirInode>(node_id, now, getuid(), getgid(), 4096, 0755, this);
+  root = make_cown<DirInode>(node_id, now, getuid(), getgid(), BLOCK_SIZE, 0755, this);
   avail_bytes_ = size;
 
   memset(&stat, 0, sizeof(stat));
   stat.f_fsid = 983983;
   stat.f_namemax = PATH_MAX;
-  stat.f_bsize = 4096;
-  stat.f_frsize = 4096;
-  stat.f_blocks = size / 4096;
+  stat.f_bsize = BLOCK_SIZE;
+  stat.f_frsize = BLOCK_SIZE;
+  stat.f_blocks = size / BLOCK_SIZE;
   stat.f_files = 0;
   stat.f_bfree = stat.f_blocks;
   stat.f_bavail = stat.f_blocks;
@@ -395,9 +577,27 @@ FileSystem::FileSystem(size_t size): next_ino_(FUSE_ROOT_ID) {
 void FileSystem::init(void* userdata, struct fuse_conn_info* conn)
 {
   add_inode(root);
-  printf("want %d\n",conn->want);
-  conn->want |= FUSE_CAP_PARALLEL_DIROPS;
-  printf("want %d\n",conn->want);
+
+
+  if(conn->capable & FUSE_CAP_PARALLEL_DIROPS)
+    conn->want |= FUSE_CAP_PARALLEL_DIROPS;
+
+  if(conn->capable & FUSE_CAP_ASYNC_READ)
+    conn->want |= FUSE_CAP_ASYNC_READ;
+  //
+  if (conn->capable & FUSE_CAP_WRITEBACK_CACHE)
+    conn->want |= FUSE_CAP_WRITEBACK_CACHE;
+  //
+  if(conn->capable & FUSE_CAP_ASYNC_DIO)
+    conn->want |= FUSE_CAP_ASYNC_DIO;
+
+  if (conn->capable & FUSE_CAP_SPLICE_WRITE)
+    conn->want |= FUSE_CAP_SPLICE_WRITE;
+
+  if (conn->capable & FUSE_CAP_SPLICE_READ)
+    conn->want |= FUSE_CAP_SPLICE_READ;
+
+
 }
 
 int FileSystem::lookup(fuse_ino_t parent_ino, const std::string& name, fuse_req_t req)
@@ -408,7 +608,7 @@ int FileSystem::lookup(fuse_ino_t parent_ino, const std::string& name, fuse_req_
 
     cown_ptr<DirInode> parent_in = dir_table->at(parent_ino);
     when(parent_in) << [=](auto  parent_in){
-      DirInode::dir_t::const_iterator it = parent_in->dentries.find(name);
+      auto it = parent_in->dentries.find(name);
       if (it == parent_in->dentries.end()) {
         //log_->debug("lookup parent {} name {} not found", parent_ino, name);
         reply_fail(-ENOENT,req);
@@ -421,10 +621,10 @@ int FileSystem::lookup(fuse_ino_t parent_ino, const std::string& name, fuse_req_
 
         if( reg_table->find(in) != reg_table->end()){
           auto inode = reg_table->at(in);
-          when(inode,regular_inode_table) << [req,this,inode](acquired_cown<RegInode> acq_inode,auto  reg_table){
+          when(inode,regular_inode_table) << [req,inode](acquired_cown<RegInode> acq_inode,auto  reg_table){
             get_inode(inode,acq_inode,reg_table);
             struct fuse_entry_param fe;
-            std::memset(&fe, 0, sizeof(fe));
+            std::memset(&fe, 0, sizeof(struct fuse_entry_param));
             fe.attr = acq_inode->i_st;
             reply_lookup_success(fe,req);
             return 0;
@@ -434,7 +634,7 @@ int FileSystem::lookup(fuse_ino_t parent_ino, const std::string& name, fuse_req_
 
         if(dir_table->find(in) != dir_table->end()){
           auto inode = dir_table->at(in);
-          when(inode,dir_inode_table) << [req,this,inode](acquired_cown<DirInode> acq_inode,auto  dir_table){
+          when(inode,dir_inode_table) << [req,inode](acquired_cown<DirInode> acq_inode,auto  dir_table){
             get_inode(inode,acq_inode,dir_table);
             struct fuse_entry_param fe;
             std::memset(&fe, 0, sizeof(fe));
@@ -501,6 +701,9 @@ int FileSystem::access(struct stat i_st, int mask, uid_t uid, gid_t gid) {
 
 int FileSystem::create(fuse_ino_t parent_ino, const std::string& name, mode_t mode, int flags, uid_t uid, gid_t gid, fuse_req_t req, struct fuse_file_info* fi)
 {
+  //fi->direct_io = 1;
+  fi->parallel_direct_writes = 1;
+  //printf("Setting direct writes");
   if(name.length() > NAME_MAX){
     std::cout << "name: " << name << "is too long" << std::endl;
     reply_fail(-ENAMETOOLONG, req);
@@ -508,8 +711,8 @@ int FileSystem::create(fuse_ino_t parent_ino, const std::string& name, mode_t mo
   }
 
   auto now = std::time(nullptr);
-  auto node_id = next_ino_++;
-  printf("node id is :%lu\n",node_id);
+
+
 
   // First acquires directory_inode_table which is a cown
   // then acquire DirInode which is also a cown and adds an entry to it
@@ -518,9 +721,11 @@ int FileSystem::create(fuse_ino_t parent_ino, const std::string& name, mode_t mo
     cown_ptr<DirInode> parent_in = dir_table->at(parent_ino);
     when(parent_in) << [=](acquired_cown<DirInode> parent_in){
 
-      auto in = make_cown<RegInode>(node_id, now, uid, gid, 4096, S_IFREG | mode, this);
+
+      fuse_ino_t node_id = 0;
+      auto in = make_cown<RegInode>(node_id, now, uid, gid, BLOCK_SIZE, S_IFREG | mode, this);
       struct stat i_st;
-      init_stat(node_id,now,uid,gid,4096,S_IFREG | mode,&i_st, true);
+      init_stat(node_id,now,uid,gid,BLOCK_SIZE,S_IFREG | mode,&i_st, true);
 
       auto fh = std::make_unique<FileHandle>(in, flags);
       DirInode::dir_t& children = parent_in->dentries;
@@ -528,6 +733,7 @@ int FileSystem::create(fuse_ino_t parent_ino, const std::string& name, mode_t mo
       if (children.find(name) != children.end()) {
         std::cout << "create name" << name << " already exists" << std::endl;
         reply_fail(-EEXIST, req);
+        //exit(-99);
         return -EEXIST;
       }
 
@@ -535,6 +741,7 @@ int FileSystem::create(fuse_ino_t parent_ino, const std::string& name, mode_t mo
       if (ret) {
         //log_->debug("create name {} access denied ret {}", name, ret);
         reply_fail(ret, req);
+        //exit(-99);
         return ret;
       }
 
@@ -549,6 +756,7 @@ int FileSystem::create(fuse_ino_t parent_ino, const std::string& name, mode_t mo
       reply_create_success(fi,fhp,req,i_st);
     };
   };
+
 }
 
 ssize_t FileSystem::readdir(fuse_req_t req, fuse_ino_t parent_ino, size_t bufsize, off_t toff)
@@ -570,14 +778,14 @@ ssize_t FileSystem::readdir(fuse_req_t req, fuse_ino_t parent_ino, size_t bufsiz
     if (off == 0) {
       size_t remaining = bufsize - pos;
       struct stat st;
-      memset(&st, 0, sizeof(st));
+      memset(&st, 0, sizeof(struct stat));
       st.st_ino = 1;
       size_t used = fuse_add_direntry(req, buf + pos, remaining, ".", &st, 1);
       if (used > remaining){
         reply_readdir(req,buf,pos);
         return pos;
       }
-      printf("Str %s",buf+pos);
+      //printf("Str %s",buf+pos);
       pos += used;
       off = 1;
     }
@@ -587,7 +795,7 @@ ssize_t FileSystem::readdir(fuse_req_t req, fuse_ino_t parent_ino, size_t bufsiz
     if (off == 1) {
       size_t remaining = bufsize - pos;
       struct stat st;
-      memset(&st, 0, sizeof(st));
+      memset(&st, 0, sizeof(struct stat));
       st.st_ino = 1;
       size_t used = fuse_add_direntry(
         req, buf + pos, remaining, "..", &st, 2);
@@ -595,7 +803,7 @@ ssize_t FileSystem::readdir(fuse_req_t req, fuse_ino_t parent_ino, size_t bufsiz
         reply_readdir(req,buf,pos);
         return pos;
       }
-      printf("Str %s",buf+pos);
+      //printf("Str %s",buf+pos);
       pos += used;
       off = 2;
     }
@@ -610,15 +818,15 @@ ssize_t FileSystem::readdir(fuse_req_t req, fuse_ino_t parent_ino, size_t bufsiz
       size_t count = 0;
       size_t target = cp_off - 2;
 
-      for (DirInode::dir_t::const_iterator it = children.begin();it != children.end();it++) {
+      for (auto & it : children) {
         if (count >= target) {
-          auto in = it->second;
+          auto in = it.second;
           struct stat st;
-          memset(&st, 0, sizeof(st));
+          memset(&st, 0, sizeof(struct stat ));
           st.st_ino = in;
           size_t remaining = bufsize - cp_pos;
           size_t used = fuse_add_direntry(
-            req, buf + cp_pos, remaining, it->first.c_str(), &st, cp_off + 1);
+            req, buf + cp_pos, remaining, it.first.c_str(), &st, cp_off + 1);
           if (used > remaining){
             reply_readdir(req,buf,cp_pos);
             return cp_pos;
@@ -633,34 +841,86 @@ ssize_t FileSystem::readdir(fuse_req_t req, fuse_ino_t parent_ino, size_t bufsiz
   };
 }
 
-int FileSystem::getattr(fuse_ino_t ino, uid_t uid, gid_t gid, fuse_req_t req)
+
+
+
+int FileSystem::getattr(fuse_ino_t ino, uid_t uid, gid_t gid, fuse_req_t req,int *ptr)
 {
-  when(dir_inode_table,regular_inode_table) << [=](auto dir_table,auto reg_table){
-    auto it = dir_table->find(ino);
-    if(it != dir_table->end()){
+
+  //int *temp = ptr;
+  //Inode * inode = reinterpret_cast<Inode*>(ino);
+  //if(ino!=1 && inode->is_regular()){
+  //  when(regular_inode_table) << [=](auto reg_table){
+  //    auto it = reg_table->find(ino);
+  //    if(it != reg_table->end()){
+  //      cown_ptr<RegInode> regInode = it->second;
+  //      when(regInode) << [=](acquired_cown<RegInode> reg_ino){
+  //        struct stat st = reg_ino->i_st;
+  //        fuse_reply_attr(req, &st, 0);
+  //        //printf("Address is %p\n",ptr);
+  //        free(temp);
+  //      };
+  //    }
+  //  };
+  //}
+  //else{
+  //  when(dir_inode_table) << [=](auto dir_table){
+  //    auto it = dir_table->find(ino);
+  //    if(it != dir_table->end()){
+  //      cown_ptr<DirInode> dirInode = it->second;
+  //      when(dirInode) << [req, ptr](acquired_cown<DirInode> dirInode){
+  //        struct stat st = dirInode->i_st;
+  //        fuse_reply_attr(req, &st, 0);
+  //        //printf("Adress is %p\n",ptr);
+  //        free(ptr);
+  //      };
+  //    }
+  //  };
+  //}
+  //
+  //return 0;
+
+
+  if(ino!=1){
+    //when()<<[=](){};
+    Inode *inode = reinterpret_cast<Inode*>(ino);
+    fuse_reply_attr(req, &inode->i_st, 0);
+    free(ptr);
+  }else{
+    when(dir_inode_table,regular_inode_table) << [=](auto dir_table,auto reg_table){
+
+      auto it = dir_table->find(ino);
+      if(it != dir_table->end()){
         cown_ptr<DirInode> dirInode = it->second;
-        when(dirInode) << [req](acquired_cown<DirInode> dir_ino){
+        when(dirInode) << [=](acquired_cown<DirInode> dir_ino){
           struct stat st = dir_ino->i_st;
           fuse_reply_attr(req, &st, 0);
+          free(ptr);
         };
-    }
-    else{
+      }
+      else{
         auto it = reg_table->find(ino);
         if(it != reg_table->end()){
           cown_ptr<RegInode> regInode = it->second;
-          when(regInode) << [req](acquired_cown<RegInode> reg_ino){
+          when(regInode) << [=](acquired_cown<RegInode> reg_ino){
             struct stat st = reg_ino->i_st;
             fuse_reply_attr(req, &st, 0);
+            free(ptr);
           };
         }
-    }
+      }
 
-  };
+    };
+  }
+
+
 }
 
-int FileSystem::setattr(fuse_ino_t ino, FileHandle* fh, struct stat* attr, int to_set, uid_t uid, gid_t gid, fuse_req_t req)
+int FileSystem::setattr(fuse_ino_t ino, FileHandle* fh, struct stat* x, int to_set, uid_t uid, gid_t gid, fuse_req_t req)
 {
+
   //Case where it's a regular inode
+  struct stat attr = *x;
   when(regular_inode_table) << [=](auto reg_table){
     auto it = reg_table->find(ino);
     if(it == reg_table->end())
@@ -669,17 +929,16 @@ int FileSystem::setattr(fuse_ino_t ino, FileHandle* fh, struct stat* attr, int t
     when(reg_inode,regular_inode_table) << [=]( acquired_cown<RegInode> reg_inode,auto){
 
       mode_t clear_mode = 0;
-      struct stat i_st = reg_inode->i_st;
       auto now = std::time(nullptr);
       if (to_set & FUSE_SET_ATTR_MODE) {
-        if (uid && i_st.st_uid != uid) {
+        if (uid && reg_inode->i_st.st_uid != uid) {
           reply_fail(-EPERM,req);
           return -EPERM;
         }
 
-        if (uid && i_st.st_gid != gid) clear_mode |= S_ISGID;
+        if (uid && reg_inode->i_st.st_gid != gid) clear_mode |= S_ISGID;
 
-        i_st.st_mode = attr->st_mode;
+        reg_inode->i_st.st_mode = attr.st_mode;
       }
 
       if (to_set & (FUSE_SET_ATTR_UID | FUSE_SET_ATTR_GID)) {
@@ -694,25 +953,25 @@ int FileSystem::setattr(fuse_ino_t ino, FileHandle* fh, struct stat* attr, int t
          */
         if (
           uid && (to_set & FUSE_SET_ATTR_UID)
-          && (i_st.st_uid != attr->st_uid))
+          && (reg_inode->i_st.st_uid != attr.st_uid))
         {
           reply_fail(-EPERM,req);
           return -EPERM;
         }
 
-        if (uid && (to_set & FUSE_SET_ATTR_GID) && (uid != i_st.st_uid))
+        if (uid && (to_set & FUSE_SET_ATTR_GID) && (uid != reg_inode->i_st.st_uid))
         {
           reply_fail(-EPERM,req);
           return -EPERM;
         }
 
-        if (to_set & FUSE_SET_ATTR_UID) i_st.st_uid = attr->st_uid;
+        if (to_set & FUSE_SET_ATTR_UID) reg_inode->i_st.st_uid = attr.st_uid;
 
-        if (to_set & FUSE_SET_ATTR_GID) i_st.st_gid = attr->st_gid;
+        if (to_set & FUSE_SET_ATTR_GID) reg_inode->i_st.st_gid = attr.st_gid;
       }
 
       if (to_set & (FUSE_SET_ATTR_MTIME | FUSE_SET_ATTR_ATIME)) {
-        if (uid && i_st.st_uid != uid)
+        if (uid && reg_inode->i_st.st_uid != uid)
         {
           reply_fail(-EPERM,req);
           return -EPERM;
@@ -720,35 +979,35 @@ int FileSystem::setattr(fuse_ino_t ino, FileHandle* fh, struct stat* attr, int t
 
 #ifdef FUSE_SET_ATTR_MTIME_NOW
         if (to_set & FUSE_SET_ATTR_MTIME_NOW)
-          i_st.st_mtime = std::time(nullptr);
+          reg_inode->i_st.st_mtime = std::time(nullptr);
         else
 #endif
           if (to_set & FUSE_SET_ATTR_MTIME)
-          i_st.st_mtime = attr->st_mtime;
+          reg_inode->i_st.st_mtime = attr.st_mtime;
 
 #ifdef FUSE_SET_ATTR_ATIME_NOW
         if (to_set & FUSE_SET_ATTR_ATIME_NOW)
-          i_st.st_atime = std::time(nullptr);
+          reg_inode->i_st.st_atime = std::time(nullptr);
         else
 #endif
           if (to_set & FUSE_SET_ATTR_ATIME)
-          i_st.st_atime = attr->st_atime;
+          reg_inode->i_st.st_atime = attr.st_atime;
       }
 
 #ifdef FUSE_SET_ATTR_CTIME
       if (to_set & FUSE_SET_ATTR_CTIME) {
-        if (uid && i_st.st_uid != uid) {
+        if (uid && reg_inode->i_st.st_uid != uid) {
           reply_fail(-EPERM,req);
           return -EPERM;
         }
-        i_st.st_ctime = attr->st_ctime;
+        reg_inode->i_st.st_ctime = attr.st_ctime;
       }
 #endif
 
       if (to_set & FUSE_SET_ATTR_SIZE) {
         if (uid) {     // not root
           if (!fh) { // not open file descriptor
-            int ret = access(i_st, W_OK, uid, gid);
+            int ret = access(reg_inode->i_st, W_OK, uid, gid);
             if (ret) {
               fuse_reply_err(req, -ret);
               return ret;
@@ -762,7 +1021,7 @@ int FileSystem::setattr(fuse_ino_t ino, FileHandle* fh, struct stat* attr, int t
         }
 
         // impose maximum size of 2TB
-        if (attr->st_size > 2199023255552) {
+        if (attr.st_size > 2199023255552) {
           reply_fail(-EFBIG,req);
           return -EFBIG;
         }
@@ -772,19 +1031,19 @@ int FileSystem::setattr(fuse_ino_t ino, FileHandle* fh, struct stat* attr, int t
 
         //TODO implement truncate
         //auto reg_in = std::dynamic_pointer_cast<RegInode>(in);
-        //int ret = truncate(reg_in, attr->st_size, uid, gid);
-        int ret  = 0;
+        int ret = truncate(reg_inode, attr.st_size, uid, gid);
         if (ret < 0) {
+          reply_fail(ret,req);
           return ret;
         }
 
-        i_st.st_mtime = now;
+        reg_inode->i_st.st_mtime = now;
       }
-      i_st.st_ctime = now;
-      if (to_set & FUSE_SET_ATTR_MODE) i_st.st_mode &= ~clear_mode;
+      reg_inode->i_st.st_ctime = now;
+      if (to_set & FUSE_SET_ATTR_MODE) reg_inode->i_st.st_mode &= ~clear_mode;
 
-      *attr = i_st;
-      fuse_reply_attr(req, attr, 0);
+      //*attr = i_st;
+      fuse_reply_attr(req, &reg_inode->i_st, 0);
       return 0;
     };
   };
@@ -799,17 +1058,17 @@ int FileSystem::setattr(fuse_ino_t ino, FileHandle* fh, struct stat* attr, int t
     when(dir_inode,dir_inode_table) << [=]( acquired_cown<DirInode> reg_inode,auto ){
 
       mode_t clear_mode = 0;
-      struct stat i_st = reg_inode->i_st;
+
       auto now = std::time(nullptr);
       if (to_set & FUSE_SET_ATTR_MODE) {
-        if (uid && i_st.st_uid != uid) {
+        if (uid && reg_inode->i_st.st_uid != uid) {
           reply_fail(-EPERM,req);
           return -EPERM;
         }
 
-        if (uid && i_st.st_gid != gid) clear_mode |= S_ISGID;
+        if (uid && reg_inode->i_st.st_gid != gid) clear_mode |= S_ISGID;
 
-        i_st.st_mode = attr->st_mode;
+        reg_inode->i_st.st_mode = attr.st_mode;
       }
 
       if (to_set & (FUSE_SET_ATTR_UID | FUSE_SET_ATTR_GID)) {
@@ -824,25 +1083,25 @@ int FileSystem::setattr(fuse_ino_t ino, FileHandle* fh, struct stat* attr, int t
          */
         if (
           uid && (to_set & FUSE_SET_ATTR_UID)
-          && (i_st.st_uid != attr->st_uid))
+          && (reg_inode->i_st.st_uid != attr.st_uid))
         {
           reply_fail(-EPERM,req);
           return -EPERM;
         }
 
-        if (uid && (to_set & FUSE_SET_ATTR_GID) && (uid != i_st.st_uid))
+        if (uid && (to_set & FUSE_SET_ATTR_GID) && (uid != reg_inode->i_st.st_uid))
         {
           reply_fail(-EPERM,req);
           return -EPERM;
         }
 
-        if (to_set & FUSE_SET_ATTR_UID) i_st.st_uid = attr->st_uid;
+        if (to_set & FUSE_SET_ATTR_UID) reg_inode->i_st.st_uid = attr.st_uid;
 
-        if (to_set & FUSE_SET_ATTR_GID) i_st.st_gid = attr->st_gid;
+        if (to_set & FUSE_SET_ATTR_GID) reg_inode->i_st.st_gid = attr.st_gid;
       }
 
       if (to_set & (FUSE_SET_ATTR_MTIME | FUSE_SET_ATTR_ATIME)) {
-        if (uid && i_st.st_uid != uid)
+        if (uid && reg_inode->i_st.st_uid != uid)
         {
           reply_fail(-EPERM,req);
           return -EPERM;
@@ -850,35 +1109,35 @@ int FileSystem::setattr(fuse_ino_t ino, FileHandle* fh, struct stat* attr, int t
 
 #ifdef FUSE_SET_ATTR_MTIME_NOW
         if (to_set & FUSE_SET_ATTR_MTIME_NOW)
-          i_st.st_mtime = std::time(nullptr);
+          reg_inode->i_st.st_mtime = std::time(nullptr);
         else
 #endif
           if (to_set & FUSE_SET_ATTR_MTIME)
-          i_st.st_mtime = attr->st_mtime;
+          reg_inode->i_st.st_mtime = attr.st_mtime;
 
 #ifdef FUSE_SET_ATTR_ATIME_NOW
         if (to_set & FUSE_SET_ATTR_ATIME_NOW)
-          i_st.st_atime = std::time(nullptr);
+          reg_inode->i_st.st_atime = std::time(nullptr);
         else
 #endif
           if (to_set & FUSE_SET_ATTR_ATIME)
-          i_st.st_atime = attr->st_atime;
+          reg_inode->i_st.st_atime = attr.st_atime;
       }
 
 #ifdef FUSE_SET_ATTR_CTIME
       if (to_set & FUSE_SET_ATTR_CTIME) {
-        if (uid && i_st.st_uid != uid) {
+        if (uid && reg_inode->i_st.st_uid != uid) {
           reply_fail(-EPERM,req);
           return -EPERM;
         }
-        i_st.st_ctime = attr->st_ctime;
+        reg_inode->i_st.st_ctime = attr.st_ctime;
       }
 #endif
 
       if (to_set & FUSE_SET_ATTR_SIZE) {
         if (uid) {     // not root
           if (!fh) { // not open file descriptor
-            int ret = access(i_st, W_OK, uid, gid);
+            int ret = access(reg_inode->i_st, W_OK, uid, gid);
             if (ret) {
               fuse_reply_err(req, -ret);
               return ret;
@@ -892,7 +1151,7 @@ int FileSystem::setattr(fuse_ino_t ino, FileHandle* fh, struct stat* attr, int t
         }
 
         // impose maximum size of 2TB
-        if (attr->st_size > 2199023255552) {
+        if (attr.st_size > 2199023255552) {
           reply_fail(-EFBIG,req);
           return -EFBIG;
         }
@@ -908,30 +1167,74 @@ int FileSystem::setattr(fuse_ino_t ino, FileHandle* fh, struct stat* attr, int t
           return ret;
         }
 
-        i_st.st_mtime = now;
+        reg_inode->i_st.st_mtime = now;
       }
-      i_st.st_ctime = now;
-      if (to_set & FUSE_SET_ATTR_MODE) i_st.st_mode &= ~clear_mode;
+      reg_inode->i_st.st_ctime = now;
+      if (to_set & FUSE_SET_ATTR_MODE) reg_inode->i_st.st_mode &= ~clear_mode;
 
-      *attr = i_st;
-      fuse_reply_attr(req, attr, 0);
+
+      fuse_reply_attr(req, &reg_inode->i_st, 0);
       return 0;
     };
   };
 
 }
+// virtual int opendir(fuse_ino_t ino, int flags, uid_t uid, gid_t gid,fuse_req_t req,struct fuse_file_info *fi)
+int FileSystem::opendir(fuse_ino_t ino, int flags, uid_t uid, gid_t gid, fuse_req_t req,struct fuse_file_info *fi)
+{
+  when(regular_inode_table) << [=](auto reg_table) {
+    auto it = reg_table->find(ino);
+    if (it == reg_table->end())
+      return -1;
+
+    auto in = it->second;
+    when(in) << [=](auto reg_in) {
+      if ((flags & O_ACCMODE) == O_RDONLY)
+      {
+        int ret = access(reg_in->i_st, R_OK, uid, gid);
+        if (ret)
+          return ret;
+      }
+      fuse_reply_open(req,fi);
+    };
+  };
+
+  when(dir_inode_table) << [=](auto dir_table){
+
+    auto it = dir_table->find(ino);
+    if(it == dir_table->end()) return -1;
+
+    auto in = it->second;
+    when(in) << [=](auto dir_in){
+      if ((flags & O_ACCMODE) == O_RDONLY) {
+        int ret = access(dir_in->i_st, R_OK, uid, gid);
+        if (ret) {
+          reply_fail(ret,req);
+          return ret;
+        }
+      }
+      fuse_reply_open(req,fi);
+    };
+
+  };
+
+
+
+  return 0;
+}
+
 
 int FileSystem::access(fuse_ino_t ino, int mask, uid_t uid, gid_t gid, fuse_req_t req)
 {
   when(regular_inode_table) << [=](auto reg_table){
-     auto it = reg_table->find(ino);
-     if(it != reg_table->end()){
-       cown_ptr<RegInode> reg_inode =  reg_table->at(ino);
-       when(regular_inode_table,reg_inode) << [=](auto reg_table,auto reg_inode){
-         int ret = access(reg_inode->i_st, mask, uid, gid);
-         fuse_reply_err(req, -ret);
-       };
-     }
+    auto it = reg_table->find(ino);
+    if(it != reg_table->end()){
+      cown_ptr<RegInode> reg_inode =  reg_table->at(ino);
+      when(regular_inode_table,reg_inode) << [=](auto reg_table,auto reg_inode){
+        int ret = access(reg_inode->i_st, mask, uid, gid);
+        fuse_reply_err(req, -ret);
+      };
+    }
   };
 
   when(dir_inode_table) << [=](auto dir_table){
@@ -972,10 +1275,10 @@ int FileSystem::mkdir(fuse_ino_t parent_ino, const std::string& name, mode_t mod
         return ret;
       }
 
-      auto node_id = next_ino_++;
-      struct stat i_st;
-      cown_ptr<DirInode> in = make_cown<DirInode>(node_id, now, uid, gid, 4096, mode, this);
-      init_stat(node_id, now, uid, gid, 4096, mode,&i_st, false);
+      fuse_ino_t node_id = 0;
+      struct stat i_st{};
+      cown_ptr<DirInode> in = make_cown<DirInode>(node_id, now, uid, gid, BLOCK_SIZE, mode, this);
+      init_stat(node_id, now, uid, gid, BLOCK_SIZE, mode,&i_st, false);
       children[name] = node_id;
       add_inode(in);
 
@@ -991,6 +1294,9 @@ int FileSystem::mkdir(fuse_ino_t parent_ino, const std::string& name, mode_t mod
 
 int FileSystem::open(fuse_ino_t ino, int flags, FileHandle** fhp, uid_t uid, gid_t gid, struct fuse_file_info* fi,fuse_req_t req)
 {
+  //fi->direct_io = 1;
+  fi->parallel_direct_writes =1;
+  //printf("Setting direct writes");
   int mode = 0;
   if ((flags & O_ACCMODE) == O_RDONLY)
     mode = R_OK;
@@ -1011,7 +1317,8 @@ int FileSystem::open(fuse_ino_t ino, int flags, FileHandle** fhp, uid_t uid, gid
     auto it = reg_table->find(ino);
     assert(it != reg_table->end());
     cown_ptr<RegInode> reg_inode = it->second;
-    when(reg_inode) << [=](acquired_cown<RegInode> acquiredCown){
+    //FIXME REMOVED REGTABLE
+    when(reg_inode,regular_inode_table) << [=](acquired_cown<RegInode> acquiredCown ,auto ){
       auto fh = std::make_unique<FileHandle>(reg_inode, flags);
       int ret = access(acquiredCown->i_st, mode, uid, gid);
 
@@ -1022,55 +1329,562 @@ int FileSystem::open(fuse_ino_t ino, int flags, FileHandle** fhp, uid_t uid, gid
 
       // TODO Support Open with Truncate flag
 
-      //if (flags & O_TRUNC) {
-      //  ret = truncate(in, 0, uid, gid);
-      //  if (ret) {
-      //    reply_fail(ret,req);
-      //    return ret;
-      //  }
-      //  auto now = std::time(nullptr);
-      //  acquiredCown->i_st.st_mtime = now;
-      //  acquiredCown->i_st.st_ctime = now;
-      //}
+      if (flags & O_TRUNC) {
+        ret = truncate(acquiredCown, 0, uid, gid);
+        if (ret) {
+          reply_fail(ret,req);
+          return ret;
+        }
+        auto now = std::time(nullptr);
+        acquiredCown->i_st.st_mtime = now;
+        acquiredCown->i_st.st_ctime = now;
+      }
 
-      *fhp = fh.release();
-      fi->fh = reinterpret_cast<uint64_t>(*fhp);
+
+      //
+      //FileHandle* fhp = fh.release();
+      //reply_create_success(fi,fhp,req,i_st);
+
+      //*fhp = fh.release();
+      FileHandle *k = fh.release();
+      auto addr = reinterpret_cast<uint64_t>(k);
+      [[maybe_unused]]auto x = fi;
+      [[maybe_unused]]auto temp = reinterpret_cast<FileHandle *>(addr);
+      fi->fh = addr;
       fuse_reply_open(req, fi);
       return 0;
     };
   };
 }
 
-ssize_t FileSystem::write(FileHandle* fh, const char* buf, size_t size, off_t off, struct fuse_file_info* fi, fuse_req_t req)
+ssize_t FileSystem::write(FileHandle* fh, const char* buf, size_t size, off_t off, struct fuse_file_info* fi, fuse_req_t req, int *ptr)
+{
+  //printf("write offset %ld\n",off);
+  cown_ptr<RegInode> reg_inode = fh->in;
+  when(reg_inode) << [=](acquired_cown<RegInode> reg_in){
+    reg_in->write(buf,size,off,req,avail_bytes_,ptr);
+  };
+
+}
+
+ssize_t FileSystem::read(FileHandle* fh, off_t offset, size_t size, fuse_req_t req)
 {
   cown_ptr<RegInode> reg_inode = fh->in;
+  when(reg_inode) << [=](acquired_cown<RegInode> reg_in){
+    reg_in->read(size,offset,req);
+  };
+
+}
+
+void FileSystem::free_space(acquired_cown<Block> & blk)
+{
+  printf("Deallocating block with id:%d\n",blk->block_number);
+  blk->buf.release();
+  //avail_bytes_+= BLOCK_SIZE;
+}
 
 
+int FileSystem::truncate(acquired_cown<RegInode> &in, off_t newsize, uid_t uid, gid_t gid)
+{
+
+  if (in->i_st.st_size == newsize)
+    return 0;
+  else if (newsize==0) {
+    printf("newsize = 0\n");
+    for(auto &pair: in->data_blocks){
+      cown_ptr<Block> block = pair.second;
+      when(block) << [=](acquired_cown<Block> blk){
+        free_space(blk);
+      };
+    }
+    in->data_blocks.clear();
+    in->i_st.st_size = 0;
+  }
+  else if (newsize < in->i_st.st_size) {
+    auto block_id = newsize / BLOCK_SIZE;
+    auto it = in->data_blocks.upper_bound(block_id);
+    while (it != in->data_blocks.end()){
+
+      cown_ptr<Block> block = it->second;
+      when(block) << [this](acquired_cown<Block> blk){
+        free_space(blk);
+      };
+
+      it = std::next(it);
+    }
+
+
+    in->data_blocks.erase(it,in->data_blocks.end());
+    in->i_st.st_size = newsize;
+  }
+  else{
+    assert(in->i_st.st_size < newsize);
+    // Allocate space for no existing blocks and init them with zero
+    for(int i=0;i<newsize;i+=BLOCK_SIZE){
+      int block_id = i/BLOCK_SIZE;
+      if(in->data_blocks.find(block_id) == in->data_blocks.end())
+        in->allocate_space(block_id,avail_bytes_);
+    }
+    //printf("\n in truncate\n");
+    //exit(-99);
+  }
+
+  return 0;
+}
+
+int FileSystem::unlink(fuse_ino_t parent_ino, const std::string& name, uid_t uid, gid_t gid,fuse_req_t req)
+{
+  when(dir_inode_table) << [=](auto dir_table ) {
+    cown_ptr<DirInode> parent_in = dir_table->at(parent_ino);
+    when(parent_in,regular_inode_table,dir_inode_table) << [=](acquired_cown<DirInode> acq_parent_in,auto reg_table,auto dir_table) {
+
+      auto entry_to_delete = acq_parent_in->dentries.find(name);
+
+      //Entry doesnt exist
+      if (entry_to_delete == acq_parent_in->dentries.end()) {
+        reply_fail(-ENOENT,req);
+        return -ENOENT;
+      };
+
+      // no access rights
+      int ret = access(acq_parent_in->i_st, W_OK, uid, gid);
+      if (ret) {
+        reply_fail(-ret,req);
+        return ret;
+      }
+      // if entry is a directory
+      if(dir_table->find(entry_to_delete->second) != dir_table->end()) {
+        reply_fail(ret,req);
+        return -EPERM;
+      }
+
+      assert( reg_table->find(entry_to_delete->second) != reg_table->end());
+
+      auto now = std::time(nullptr);
+      cown_ptr<RegInode> reg_inode =  reg_table->find(entry_to_delete->second)->second;
+
+      acq_parent_in->dentries.erase(entry_to_delete);
+      when(reg_inode,parent_in) << [&now,req](auto reg_in,auto parent_in){
+        reg_in->i_st.st_ctime = now;
+        reg_in->i_st.st_nlink--;
+
+        parent_in->i_st.st_ctime = now;
+        parent_in->i_st.st_mtime = now;
+        fuse_reply_err(req, 0);
+      };
+    };
+  };
+}
+
+int FileSystem::rmdir(fuse_ino_t parent_ino, const std::string& name, uid_t uid, gid_t gid, fuse_req_t req)
+{
+  when(dir_inode_table) << [=](auto dir_table){
+    auto it = dir_table->find(parent_ino);
+    cown_ptr<DirInode> parent_in = it->second;
+    when(parent_in,dir_inode_table) << [=](auto acq_parent_in,auto dir_table){
+      DirInode::dir_t& children = acq_parent_in->dentries;
+      auto entry_to_delete = children.find(name);
+      if( entry_to_delete == children.end()){
+        reply_fail(-ENOENT,req);
+        return -ENOENT;
+      }
+
+
+      // if not a directory
+      if(dir_table->find(entry_to_delete->second) == dir_table->end()) {
+        reply_fail(-ENOTDIR,req);
+        return -ENOTDIR;
+      }
+
+      assert(dir_table->find(entry_to_delete->second) != dir_table->end());
+      cown_ptr<DirInode> inode_to_delete = dir_table->find(entry_to_delete->second)->second;
+
+      when(inode_to_delete,parent_in) << [req,entry_to_delete](auto inode_to_delete,auto parent_in){
+
+        if(inode_to_delete->dentries.size()){
+          reply_fail(-ENOTEMPTY,req);
+          return -ENOTEMPTY;
+        }
+
+        inode_to_delete->i_st.st_nlink -= 2;
+        assert(inode_to_delete->i_st.st_nlink == 0);
+
+        auto now = std::time(nullptr);
+        parent_in->i_st.st_mtime = now;
+        parent_in->i_st.st_ctime = now;
+        parent_in->dentries.erase(entry_to_delete->first);
+        parent_in->i_st.st_nlink--;
+        fuse_reply_err(req, 0);
+      };
+    };
+  };
+}
+
+int FileSystem::rename(fuse_ino_t parent_ino, const std::string& oldname, fuse_ino_t newparent_ino, const std::string& newname, uid_t uid, gid_t gid, fuse_req_t req)
+{
+  if (oldname.length() > NAME_MAX || newname.length() > NAME_MAX)
+    return -ENAMETOOLONG;
+
+  when(dir_inode_table) << [=](auto dir_table){
+
+
+
+    if(parent_ino != newparent_ino){
+      auto old_parent_inode = dir_table->find(parent_ino)->second;
+      auto new_parent_inode = dir_table->find(newparent_ino)->second;
+
+
+
+      when(old_parent_inode, new_parent_inode) << [=](acquired_cown<DirInode> acq_old_parent_in,acquired_cown<DirInode>  acq_new_parent_in){
+
+
+
+
+        //old entry = (old_name,ino)
+        auto old_entry = acq_old_parent_in->dentries.find(oldname);
+        // check if old entry does not exist
+        if (old_entry == acq_old_parent_in->dentries.end()) {
+          reply_fail(-ENOENT,req);
+          return -ENOENT;
+        }
+
+        int ret = access(acq_old_parent_in->i_st, W_OK, uid, gid);
+        if (ret) {
+          fuse_reply_err(req,-ret);
+          return ret;
+        }
+
+        ret = access(acq_new_parent_in->i_st, W_OK, uid, gid);
+        if (ret) {
+          fuse_reply_err(req,-ret);
+          return ret;
+        }
+
+        Inode * old_in = reinterpret_cast<Inode *>(old_entry->second);
+        if (old_in->i_st.st_mode & S_IFDIR) {
+          ret = access(old_in->i_st, W_OK, uid, gid);
+          if (ret) return ret;
+        }
+
+        if (acq_old_parent_in->i_st.st_mode & S_ISVTX) {
+          if (uid && uid != old_in->i_st.st_uid && uid != acq_old_parent_in->i_st.st_uid)
+            return -EPERM;
+        }
+
+        //new entry = (old_name,ino)
+        auto dupl_entry =acq_new_parent_in->dentries.find(newname);
+
+
+        //new_name does not exist as an entry to new_parent_entries -- easy, just remove the old entry (oldname,ino) and add new entry (newname,ino)
+        if(dupl_entry == acq_new_parent_in->dentries.end()){
+          //delete <old_name,ino> for old_parent_dir
+          std::cout << "Erasing entry" << old_entry->first << " " << old_entry->second << " from dir with ino " << acq_old_parent_in->ino << std::endl;
+          acq_old_parent_in->dentries.erase(old_entry->first);
+          //add entry <new_name,ino>
+          acq_new_parent_in->dentries.insert({newname,old_entry->second});
+          //reply to kernel
+
+          if(old_in->is_directory())
+          {
+            acq_old_parent_in->i_st.st_nlink--;
+            acq_new_parent_in->i_st.st_nlink++;
+          }
+
+          fuse_reply_err(req, 0);
+        }
+        // new_name already exists as an entry to new_parent_entries ==> decrement nlinks of this inode
+        else{
+
+          when(regular_inode_table,dir_inode_table) << [uid,old_entry,dupl_entry,old_parent_inode,new_parent_inode,req](auto reg_table,auto dir_table){
+            cown_ptr<RegInode> old_reg_ino_cown = reg_table->find(old_entry->second) == reg_table->end() ? make_cown<RegInode>() : reg_table->find(old_entry->second)->second;
+            cown_ptr<RegInode> dupl_reg_ino_cown = reg_table->find(dupl_entry->second) == reg_table->end() ? make_cown<RegInode>() : reg_table->find(dupl_entry->second)->second;
+
+            cown_ptr<DirInode> old_dir_ino_cown = dir_table->find(old_entry->second) == dir_table->end() ? make_cown<DirInode>() : dir_table->find(old_entry->second)->second;
+            cown_ptr<DirInode> dupl_dir_ino_cown = dir_table->find(dupl_entry->second) == dir_table->end() ? make_cown<DirInode>() : dir_table->find(dupl_entry->second)->second;
+
+
+            when(old_parent_inode,
+                 new_parent_inode,
+                 old_reg_ino_cown,
+                 dupl_reg_ino_cown,
+                 old_dir_ino_cown,
+                 dupl_dir_ino_cown) << [=]
+              (acquired_cown<DirInode> acq_old_parent_in,
+               acquired_cown<DirInode>  acq_new_parent_in,
+               acquired_cown<RegInode> old_reg_in,
+               acquired_cown<RegInode> dupl_reg_in,
+               acquired_cown<DirInode> old_dir_in,
+               acquired_cown<DirInode> dupl_dir_in){
+
+                if (
+                  !dupl_reg_in->fake && acq_new_parent_in->i_st.st_mode & S_ISVTX && uid
+                  && uid != dupl_reg_in->i_st.st_uid && uid != acq_new_parent_in->i_st.st_uid) {
+                  reply_fail(-EPERM,req);
+                  return -EPERM;
+                }
+
+                if (
+                  !dupl_dir_in->fake && acq_new_parent_in->i_st.st_mode & S_ISVTX && uid
+                  && uid != dupl_reg_in->i_st.st_uid && uid != acq_new_parent_in->i_st.st_uid) {
+                  reply_fail(-EPERM,req);
+                  return -EPERM;
+                }
+
+
+                if( !old_dir_in->fake && (old_dir_in->i_st.st_mode & S_IFDIR)){
+                  if( !dupl_dir_in->fake && (dupl_dir_in->i_st.st_mode & S_IFDIR)  ){
+                    if(!dupl_dir_in->dentries.empty()){
+                      reply_fail(-ENOTEMPTY,req);
+                      return -ENOTEMPTY;
+                    }
+                  }
+                  else{
+                    reply_fail(-ENOTDIR,req);
+                    return -ENOTDIR;
+                  }
+                }else {
+                  if (!dupl_dir_in->fake && dupl_dir_in->i_st.st_mode & S_IFDIR) return -EISDIR;
+                }
+                acq_old_parent_in->i_st.st_ctime = std::time(nullptr);
+
+                acq_old_parent_in->dentries.erase(old_entry->first);
+                acq_new_parent_in->dentries.erase(dupl_entry->first);
+                acq_new_parent_in->dentries.insert({old_entry->first,old_entry->second});
+
+                if(!old_dir_in->fake && !dupl_dir_in->fake){
+                  acq_old_parent_in->i_st.st_nlink--;
+                  acq_new_parent_in->i_st.st_nlink++;
+                }
+                if(!dupl_reg_in->fake)
+                  dupl_reg_in->i_st.st_nlink--;
+
+                fuse_reply_err(req,0);
+              };
+
+
+          };
+
+
+
+
+
+
+
+        }
+
+
+      };
+
+    }
+
+    else{
+      printf("\n--------in else-------\n");
+
+
+      auto old_parent_inode = dir_table->find(parent_ino)->second;
+
+
+
+
+      when(old_parent_inode) << [=](acquired_cown<DirInode> acq_old_parent_in){
+
+
+
+
+        //old entry = (old_name,ino)
+        auto old_entry = acq_old_parent_in->dentries.find(oldname);
+        // check if old entry does not exist
+        if (old_entry == acq_old_parent_in->dentries.end()) {
+          reply_fail(-ENOENT,req);
+          return -ENOENT;
+        }
+
+        int ret = access(acq_old_parent_in->i_st, W_OK, uid, gid);
+        if (ret) {
+          fuse_reply_err(req,-ret);
+          return ret;
+        }
+
+        ret = access(acq_old_parent_in->i_st, W_OK, uid, gid);
+        if (ret) {
+          fuse_reply_err(req,-ret);
+          return ret;
+        }
+
+        Inode * old_in = reinterpret_cast<Inode *>(old_entry->second);
+        if (old_in->i_st.st_mode & S_IFDIR) {
+          ret = access(old_in->i_st, W_OK, uid, gid);
+          if (ret) {
+            reply_fail(ret,req);
+            return ret;
+          }
+        }
+
+        if (acq_old_parent_in->i_st.st_mode & S_ISVTX) {
+          if (uid && uid != old_in->i_st.st_uid && uid != acq_old_parent_in->i_st.st_uid)
+            return -EPERM;
+        }
+
+
+
+
+
+        //new entry = (old_name,ino)
+        auto dupl_entry =acq_old_parent_in->dentries.find(newname);
+
+
+        //new_name does not exist as an entry to new_parent_entries -- easy, just remove the old entry (oldname,ino) and add new entry (newname,ino)
+        if(dupl_entry == acq_old_parent_in->dentries.end()){
+          //delete <old_name,ino> for old_parent_dir
+          std::cout << "Erasing entry" << old_entry->first << " " << old_entry->second << " from dir with ino " << acq_old_parent_in->ino << std::endl;
+          acq_old_parent_in->dentries.erase(old_entry->first);
+          //add entry <new_name,ino>
+          acq_old_parent_in->dentries.insert({newname,old_entry->second});
+
+          //reply to kernel
+          fuse_reply_err(req, 0);
+        }
+        // new_name already exists as an entry to new_parent_entries ==> decrement nlinks of this inode
+        else{
+
+          when(regular_inode_table,dir_inode_table) << [uid,old_entry,dupl_entry,old_parent_inode,req](auto reg_table,auto dir_table){
+            cown_ptr<RegInode> old_reg_ino_cown = reg_table->find(old_entry->second) == reg_table->end() ? make_cown<RegInode>() : reg_table->find(old_entry->second)->second;
+            cown_ptr<RegInode> dupl_reg_ino_cown = reg_table->find(dupl_entry->second) == reg_table->end() ? make_cown<RegInode>() : reg_table->find(dupl_entry->second)->second;
+
+            cown_ptr<DirInode> old_dir_ino_cown = dir_table->find(old_entry->second) == dir_table->end() ? make_cown<DirInode>() : dir_table->find(old_entry->second)->second;
+            cown_ptr<DirInode> dupl_dir_ino_cown = dir_table->find(dupl_entry->second) == dir_table->end() ? make_cown<DirInode>() : dir_table->find(dupl_entry->second)->second;
+
+
+            when(old_parent_inode,
+                 old_reg_ino_cown,
+                 dupl_reg_ino_cown,
+                 old_dir_ino_cown,
+                 dupl_dir_ino_cown) << [=]
+              (acquired_cown<DirInode> acq_old_parent_in,
+               acquired_cown<RegInode> old_reg_in,
+               acquired_cown<RegInode> dupl_reg_in,
+               acquired_cown<DirInode> old_dir_in,
+               acquired_cown<DirInode> dupl_dir_in){
+
+                if (
+                  !dupl_reg_in->fake && acq_old_parent_in->i_st.st_mode & S_ISVTX && uid
+                  && uid != dupl_reg_in->i_st.st_uid && uid != acq_old_parent_in->i_st.st_uid) {
+                  reply_fail(-EPERM,req);
+                  return -EPERM;
+                }
+
+                if (
+                  !dupl_dir_in->fake && acq_old_parent_in->i_st.st_mode & S_ISVTX && uid
+                  && uid != dupl_reg_in->i_st.st_uid && uid != acq_old_parent_in->i_st.st_uid) {
+                  reply_fail(-EPERM,req);
+                  return -EPERM;
+                }
+
+
+                if( !old_dir_in->fake && (old_dir_in->i_st.st_mode & S_IFDIR)){
+                  if( !dupl_dir_in->fake && (dupl_dir_in->i_st.st_mode & S_IFDIR)  ){
+                    if(!dupl_dir_in->dentries.empty()){
+                      reply_fail(-ENOTEMPTY,req);
+                      return -ENOTEMPTY;
+                    }
+                  }
+                  else{
+                    reply_fail(-ENOTDIR,req);
+                    return -ENOTDIR;
+                  }
+                }else {
+                  if (!dupl_dir_in->fake && dupl_dir_in->i_st.st_mode & S_IFDIR) return -EISDIR;
+                }
+                acq_old_parent_in->i_st.st_ctime = std::time(nullptr);
+
+                acq_old_parent_in->dentries.erase(old_entry->first);
+                acq_old_parent_in->dentries.erase(dupl_entry->first);
+                acq_old_parent_in->dentries.insert({old_entry->first,old_entry->second});
+
+                if(!old_dir_in->fake && !dupl_dir_in->fake){
+                  acq_old_parent_in->i_st.st_nlink--;
+                  acq_old_parent_in->i_st.st_nlink++;
+                }
+                if(!dupl_reg_in->fake)
+                  dupl_reg_in->i_st.st_nlink--;
+
+                fuse_reply_err(req,0);
+              };
+
+
+          };
+
+
+
+
+
+
+
+        }
+
+
+      };
+
+    };
+  };
 }
 
 
 
 
+void FileSystem::forget(fuse_ino_t ino, unsigned long nlookup,fuse_req_t req)
+{
+  when(dir_inode_table,regular_inode_table) << [=](auto dir_table,auto reg_table){
+    auto it = dir_table->find(ino);
+    if(it != dir_table->end()){
+      cown_ptr<DirInode> dirInode = it->second;
+      when(dirInode,dir_inode_table) << [ino,nlookup](acquired_cown<DirInode> dir_ino,auto dir_table){
+        assert(dir_ino->krefs>0);
+        dir_ino->krefs -= nlookup;
+        assert(dir_ino->krefs>=0);
+        if(dir_ino->krefs == 0  && dir_ino->i_st.st_nlink == 0){
+          printf("Erasing dir-ino:%lu with nlookup: %lud and nlinks: %lu",dir_ino->i_st.st_ino,dir_ino->krefs,dir_ino->i_st.st_nlink);
+          dir_table->erase(ino);
+        }
+        //printf("krefs %d\n",dir_ino->krefs);
+      };
+    }
+    else{
+      auto it = reg_table->find(ino);
+      if(it != reg_table->end()){
+        cown_ptr<RegInode> regInode = it->second;
+        when(regInode,regular_inode_table) << [nlookup,ino, this](acquired_cown<RegInode> reg_ino,auto reg_table){
+          assert(reg_ino->krefs>0);
+          reg_ino->krefs -= nlookup;
+          assert(reg_ino->krefs>=0);
+          if(reg_ino->krefs == 0 && reg_ino->i_st.st_nlink == 0){
+            //printf("Erasing reg-ino:%lu with nlookup: %lud and nlinks: %lu",reg_ino->i_st.st_ino,reg_ino->krefs,reg_ino->i_st.st_nlink);
+            reg_table->erase(ino);
+            for(auto &pair: reg_ino->data_blocks){
+              cown_ptr<Block> block = pair.second;
+              when(block) << [=](acquired_cown<Block> blk){
+                free_space(blk);
+              };
+            }
+          }
+          //printf("krefs %d\n",reg_ino->krefs);
+        };
+      }
+    }
 
+  };
+}
 
-
+//FIXME: FIX BLOCK SIZE
 
 int main(int argc, char *argv[])
 {
-
-  cown_ptr<RegInode> reg1 = make_cown<RegInode>(5, 5, 5, 5, 4096, S_IFREG | 5, nullptr);
-  cown_ptr<RegInode> reg2 = make_cown<RegInode>(5, 5, 5, 5, 4096, S_IFREG | 5, nullptr);
-
-
-  schedule_lambda(2,arr,  []() { std::cout << "Hello world!\n"; }  );
-
-  //char buf[4096] = "helloworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworldworld";
-  //in->write(buf, strlen(buf),11500, reinterpret_cast<fuse_req_t>(5));
-
-  //exit(1);
+  setbuf(stdout,0);
+  system("fusermount -u /home/csdeptucy/ssfs");
   SystematicTestHarness harness(argc, argv);
   struct filesystem_opts opts;
   // option defaults
+
   opts.size = 512 << 20;
   opts.debug = false;
   struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
@@ -1082,7 +1896,7 @@ int main(int argc, char *argv[])
 
   struct fuse_chan* ch;
   int err = -1;
-  char* mountpoint = "/tmp/ssfs";
+  const char* mountpoint = "/home/csdeptucy/ssfs";
 
 
 

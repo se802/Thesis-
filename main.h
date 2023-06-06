@@ -1,8 +1,9 @@
 #pragma once
+#define FUSE_USE_VERSION 34
+
 
 #include "debug/harness.h"
 #include "cpp/when.h"
-
 #include <atomic>
 #include <cassert>
 #include <cstring>
@@ -17,6 +18,28 @@
 using namespace verona::cpp;
 struct FileHandle;
 
+struct fuse_req {
+  struct fuse_session *se;
+  uint64_t unique;
+  int ctr;
+  pthread_mutex_t lock;
+  struct fuse_ctx ctx;
+  struct fuse_chan *ch;
+  int interrupted;
+  unsigned int ioctl_64bit : 1;
+  union {
+    struct {
+      uint64_t unique;
+    } i;
+    struct {
+      fuse_interrupt_func_t func;
+      void *data;
+    } ni;
+  } u;
+  struct fuse_req *next;
+  struct fuse_req *prev;
+  int *buf_mem;
+};
 
 struct filesystem_opts {
   size_t size;
@@ -65,23 +88,7 @@ struct my_thread_data {
   struct fuse_buf *fbuf;
 };
 
-void *my_thread_function(void *arg) {
-  struct my_thread_data *data = (struct my_thread_data *) arg;
-  struct fuse_session *se = data->se;
-  struct fuse_buf *fbuf = data->fbuf;
 
-  int sec = rand() % 500;
-  // printf("I am thread %lu and I am going to sleep %d nanoseconds\n",pthread_self(),sec);
-  //usleep(sec);
-
-  // process the FUSE request
-  fuse_session_process_buf(se, fbuf);
-  //free(fbuf->mem);
-  //free(fbuf);
-  //free(data);
-
-  return NULL;
-}
 
 
 
@@ -122,48 +129,29 @@ struct ExternalSource
 
     int res = 0;
     while (!fuse_session_exited(se)) {
-      struct fuse_buf *fbuf = (struct fuse_buf *) malloc(sizeof(struct fuse_buf));
-      fbuf->mem = NULL;
-      if (fbuf == NULL) {
-        // handle allocation failure
-        break;
-      }
-      //printf("Before receive_buf %lu \n",pthread_self());
-      res = fuse_session_receive_buf(se, fbuf);
+      struct fuse_buf fbuf{.mem= NULL} ;
 
+
+      //printf("Before receive_buf %lu \n",pthread_self());
+      res = fuse_session_receive_buf(se, &fbuf);
+      //sleep(2);
       if (res == -EINTR) {
-        free(fbuf->mem);
-        free(fbuf);
+        //free(fbuf->mem);
+        //free(fbuf);
         continue;
       }
       if (res <= 0) {
-        free(fbuf->mem);
-        free(fbuf);
+        //free(fbuf->mem);
+        //free(fbuf);
         break;
       }
 
 
-
-
-
-
-
-
-      when() << [=]() {
-        fuse_session_process_buf(se, fbuf);
-        free(fbuf);
-      };
+      fuse_session_process_buf(se, &fbuf);
     }
 
 
   }
-
-
-
-
-
-
-
 };
 
 void my_session_loop(SystematicTestHarness* harness,struct fuse_session *se)
@@ -176,7 +164,10 @@ void my_session_loop(SystematicTestHarness* harness,struct fuse_session *se)
   schedule_lambda<YesTransfer>(p, [=]() {
     // Start IO Thread
     Scheduler::add_external_event_source();
-    harness->external_thread([=]() {   es->my_fuse_session_loop(se); });
+    harness->external_thread([=]() {
+      //fuse_session_loop(se);
+      es->my_fuse_session_loop(se);
+      });
   });
 }
 
@@ -186,23 +177,23 @@ public:
   filesystem_base() {
     std::memset(&ops_, 0, sizeof(ops_));
     ops_.init = ll_init,
-    //ops_.destroy = ll_destroy;
       ops_.create = ll_create;
     //ops_.release = ll_release;
-    //ops_.unlink = ll_unlink;
-    //ops_.forget = ll_forget;
+    ops_.unlink = ll_unlink;
+    ops_.forget = ll_forget;
     //ops_.forget_multi = ll_forget_multi;
     ops_.getattr = ll_getattr;
     ops_.lookup = ll_lookup;
-    //ops_.opendir = ll_opendir;
+    ops_.opendir = ll_opendir;
     ops_.readdir = ll_readdir;
     //ops_.releasedir = ll_releasedir;
-    //ops_.open = ll_open;
+    ops_.open = ll_open;
     ops_.write = ll_write;
-    //ops_.read = ll_read;
+    ops_.read = ll_read;
+
     ops_.mkdir = ll_mkdir;
-    //ops_.rmdir = ll_rmdir;
-    //ops_.rename = ll_rename;
+    ops_.rmdir = ll_rmdir;
+    ops_.rename = ll_rename;
     ops_.setattr = ll_setattr;
     //ops_.readlink = ll_readlink;
     //ops_.symlink = ll_symlink;
@@ -220,7 +211,7 @@ public:
 public:
   //virtual void destroy() = 0;
   virtual int lookup(fuse_ino_t parent_ino, const std::string& name,fuse_req_t req) = 0;
-  //virtual void forget(fuse_ino_t ino, long unsigned nlookup) = 0;
+  virtual void forget(fuse_ino_t ino, long unsigned nlookup,fuse_req_t req) = 0;
   //virtual int statfs(fuse_ino_t ino, struct statvfs* stbuf) = 0;
   virtual void init(void *userdata,struct fuse_conn_info *conn) = 0;
   //virtual int mknod(fuse_ino_t parent_ino,const std::string& name,mode_t mode,dev_t rdev,struct stat* st,uid_t uid,gid_t gid)= 0;
@@ -236,22 +227,20 @@ public:
   //  gid_t gid)
   //  = 0;
   //
-  //virtual int rename(
-  //  fuse_ino_t parent_ino,
-  //  const std::string& name,
-  //  fuse_ino_t newparent_ino,
-  //  const std::string& newname,
-  //  uid_t uid,
-  //  gid_t gid)
-  //  = 0;
-  //
-  //virtual int
-  //unlink(fuse_ino_t parent_ino, const std::string& name, uid_t uid, gid_t gid)
-  //  = 0;
+  virtual int rename(
+    fuse_ino_t parent_ino,
+    const std::string& name,
+    fuse_ino_t newparent_ino,
+    const std::string& newname,
+    uid_t uid,
+    gid_t gid,fuse_req_t req)
+    = 0;
+
+  virtual int unlink(fuse_ino_t parent_ino, const std::string& name, uid_t uid, gid_t gid,fuse_req_t req) = 0;
   //
   virtual int access(fuse_ino_t ino, int mask, uid_t uid, gid_t gid, fuse_req_t req) = 0;
 
-  virtual int getattr(fuse_ino_t ino, uid_t uid, gid_t gid,fuse_req_t req) = 0;
+  virtual int getattr(fuse_ino_t ino, uid_t uid, gid_t gid,fuse_req_t req,int *ptr) = 0;
 
   virtual int setattr(fuse_ino_t ino,FileHandle* fh,struct stat* attr,int to_set,uid_t uid,gid_t gid,fuse_req_t req)= 0;
 
@@ -265,18 +254,16 @@ public:
   //
   virtual ssize_t readdir(fuse_req_t req, fuse_ino_t ino, size_t bufsize, off_t off)= 0;
   //
-  //virtual int
-  //rmdir(fuse_ino_t parent_ino, const std::string& name, uid_t uid, gid_t gid)
-  //  = 0;
-  //
+  virtual int rmdir(fuse_ino_t parent_ino, const std::string& name, uid_t uid, gid_t gid,fuse_req_t req) = 0;
+
+  virtual int opendir(fuse_ino_t ino, int flags, uid_t uid, gid_t gid,fuse_req_t req,struct fuse_file_info *fi) = 0;
   //virtual void releasedir(fuse_ino_t ino) = 0;
 
   virtual int create(fuse_ino_t parent_ino,const std::string& name,mode_t mode,int flags,uid_t uid,gid_t gid,fuse_req_t req,struct fuse_file_info* fi)= 0;
 
   virtual int open(fuse_ino_t ino, int flags, FileHandle** fhp, uid_t uid, gid_t gid,  struct fuse_file_info* fi,fuse_req_t req) = 0;
-  //virtual ssize_t write(FileHandle* fh, const char * buf, size_t size, off_t off, struct fuse_file_info *fi,fuse_req_t req)= 0;
-  //virtual ssize_t read(FileHandle* fh, off_t offset, size_t size, char* buf)
-  //  = 0;
+  virtual ssize_t write(FileHandle* fh, const char * buf, size_t size, off_t off, struct fuse_file_info *fi,fuse_req_t req, int *ptr)= 0;
+  virtual ssize_t read(FileHandle* fh, off_t offset, size_t size, fuse_req_t req) = 0;
   //virtual void release(fuse_ino_t ino, FileHandle* fh) = 0;
 
 private:
@@ -314,6 +301,8 @@ private:
     fs->create(parent, name, mode, fi->flags, ctx->uid, ctx->gid,req,fi);
   }
 
+
+
   //static void
   //ll_release(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info* fi) {
   //  auto fs = get(req);
@@ -323,22 +312,21 @@ private:
   //  fuse_reply_err(req, 0);
   //}
 
-  //static void ll_unlink(fuse_req_t req, fuse_ino_t parent, const char* name) {
-  //  auto fs = get(req);
-  //  const struct fuse_ctx* ctx = fuse_req_ctx(req);
-  //
-  //  int ret = fs->unlink(parent, name, ctx->uid, ctx->gid);
-  //  fuse_reply_err(req, -ret);
-  //}
+  static void ll_unlink(fuse_req_t req, fuse_ino_t parent, const char* name) {
+    auto fs = get(req);
+    const struct fuse_ctx* ctx = fuse_req_ctx(req);
 
-  //static void
-  //ll_forget(fuse_req_t req, fuse_ino_t ino, long unsigned nlookup) {
-  //  auto fs = get(req);
-  //
-  //  fs->forget(ino, nlookup);
-  //  fuse_reply_none(req);
-  //}
-  //
+    fs->unlink(parent, name, ctx->uid, ctx->gid,req);
+  }
+
+  static void
+  ll_forget(fuse_req_t req, fuse_ino_t ino, long unsigned nlookup) {
+    auto fs = get(req);
+
+    fs->forget(ino, nlookup,req);
+    //fuse_reply_none(req);
+  }
+
   //static void ll_forget_multi(
   //  fuse_req_t req, size_t count, struct fuse_forget_data* forgets) {
   //  auto fs = get(req);
@@ -360,7 +348,8 @@ private:
     auto fs = get(req);
     const struct fuse_ctx* ctx = fuse_req_ctx(req);
     struct stat st;
-    fs->getattr(ino, ctx->uid, ctx->gid,req);
+    //printf("Adress is %p\n",req->buf_mem);
+    fs->getattr(ino, ctx->uid, ctx->gid,req,req->buf_mem);
     //if (ret == 0)
     //  fuse_reply_attr(req, &st, ret);
     //else
@@ -376,18 +365,18 @@ private:
     fs->lookup(parent, name,req);
   }
 
-  //static void
-  //ll_opendir(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info* fi) {
-  //  auto fs = get(req);
-  //  const struct fuse_ctx* ctx = fuse_req_ctx(req);
-  //
-  //  int ret = fs->opendir(ino, fi->flags, ctx->uid, ctx->gid);
-  //  if (ret == 0) {
-  //    fuse_reply_open(req, fi);
-  //  } else {
-  //    fuse_reply_err(req, -ret);
-  //  }
-  //}
+  static void
+  ll_opendir(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info* fi) {
+    auto fs = get(req);
+    const struct fuse_ctx* ctx = fuse_req_ctx(req);
+    //printf("Ptr is %p \n",req->buf_mem);
+    fs->opendir(ino, fi->flags, ctx->uid, ctx->gid,req,fi);
+    //if (ret == 0) {
+    //fuse_reply_open(req, fi);
+    //} else {
+    //  fuse_reply_err(req, -ret);
+    //}
+  }
 
 
 
@@ -430,10 +419,13 @@ private:
   }
 
   static void ll_write (fuse_req_t req, fuse_ino_t ino, const char *buf,size_t size, off_t off, struct fuse_file_info *fi) {
+
     auto fs = get(req);
     auto fh = reinterpret_cast<FileHandle*>(fi->fh);
 
-    //fs->write(fh,buf,size,off,fi,req);
+    //std::cout << "I am thread " << pthread_self() << std::endl;
+    //printf("seeing memory at %d\n",*req->buf_mem);
+    fs->write(fh,buf,size,off,fi,req,req->buf_mem);
     //TODO REMOVE AND CHANGE
     //if (ret >= 0)
     //  fuse_reply_write(req, ret);
@@ -441,23 +433,26 @@ private:
     //  fuse_reply_err(req, -ret);
   }
 
-  //static void ll_read(
-  //  fuse_req_t req,
-  //  fuse_ino_t ino,
-  //  size_t size,
-  //  off_t off,
-  //  struct fuse_file_info* fi) {
-  //  auto fs = get(req);
-  //  auto fh = reinterpret_cast<FileHandle*>(fi->fh);
-  //
-  //  auto buf = std::unique_ptr<char[]>(new char[size]);
-  //
-  //  ssize_t ret = fs->read(fh, off, size, buf.get());
-  //  if (ret >= 0)
-  //    fuse_reply_buf(req, buf.get(), ret);
-  //  else
-  //    fuse_reply_err(req, -ret);
-  //}
+  static void ll_read(
+    fuse_req_t req,
+    fuse_ino_t ino,
+    size_t size,
+    off_t off,
+    struct fuse_file_info* fi) {
+    auto fs = get(req);
+    auto fh = reinterpret_cast<FileHandle*>(fi->fh);
+
+
+    //printf("\nread offset %ld\n",off);
+    auto time = std::time(nullptr);
+    //printf("req in ll_read %d, time: %d\n",req,time);
+    fs->read(fh, off, size, req);
+    //TODO: REMOVE IT FROM HERE AND PLACE IT IN THE CORRECT POSITION
+    //if (ret >= 0)
+    //  fuse_reply_buf(req, buf.get(), ret);
+    //else
+    //  fuse_reply_err(req, -ret);
+  }
 
 
 
@@ -468,28 +463,27 @@ private:
     fs->mkdir(parent, name, mode, ctx->uid, ctx->gid,req);
   }
 
-  //static void ll_rmdir(fuse_req_t req, fuse_ino_t parent, const char* name) {
-  //  auto fs = get(req);
-  //  const struct fuse_ctx* ctx = fuse_req_ctx(req);
-  //
-  //  int ret = fs->rmdir(parent, name, ctx->uid, ctx->gid);
-  //  fuse_reply_err(req, -ret);
-  //}
-  //
-  //static void ll_rename(
-  //  fuse_req_t req,
-  //  fuse_ino_t parent,
-  //  const char* name,
-  //  fuse_ino_t newparent,
-  //  const char* newname,unsigned int idk) {
-  //  auto fs = get(req);
-  //  const struct fuse_ctx* ctx = fuse_req_ctx(req);
-  //
-  //  int ret = fs->rename(
-  //    parent, name, newparent, newname, ctx->uid, ctx->gid);
-  //  fuse_reply_err(req, -ret);
-  //}
-  //
+  static void ll_rmdir(fuse_req_t req, fuse_ino_t parent, const char* name) {
+    auto fs = get(req);
+    const struct fuse_ctx* ctx = fuse_req_ctx(req);
+
+    fs->rmdir(parent, name, ctx->uid, ctx->gid,req);
+    //fuse_reply_err(req, -ret);
+  }
+
+  static void ll_rename(
+    fuse_req_t req,
+    fuse_ino_t parent,
+    const char* name,
+    fuse_ino_t newparent,
+    const char* newname,unsigned int idk) {
+    auto fs = get(req);
+    const struct fuse_ctx* ctx = fuse_req_ctx(req);
+
+    fs->rename(parent, name, newparent, newname, ctx->uid, ctx->gid,req);
+    //fuse_reply_err(req, -ret);
+  }
+
   static void ll_setattr(
     fuse_req_t req,
     fuse_ino_t ino,
@@ -624,49 +618,59 @@ protected:
     fuse_reply_err(req, -ret);
   }
 
-  static void reply_create_success(struct fuse_file_info* fi,FileHandle* fh,fuse_req_t req,struct stat st){
-    struct fuse_entry_param fe;
-    std::memset(&fe, 0, sizeof(fe));
-
-    fi->fh = reinterpret_cast<uint64_t>(fh);
-    fe.attr = st;
-    fe.ino = fe.attr.st_ino;
-    fe.generation = 0;
-    fe.entry_timeout = 1.0;
-    fuse_reply_create(req, &fe, fi);
-  }
-
-  static void reply_lookup_success(struct fuse_entry_param fe,fuse_req_t req){
-    fe.ino = fe.attr.st_ino;
-    fe.generation = 0;
-    fuse_reply_entry(req, &fe);
-  }
-
-  static void reply_readdir(fuse_req_t req,char *buf,size_t ret){
-    if (ret >= 0) {
-      fuse_reply_buf(req, buf, (size_t)ret);
-    } else {
-      //FIXME: ELSE WILL NEVER BE EXECUTED
-      int r = (int)ret;
-      fuse_reply_err(req, -r);
-    }
-  }
-
-  static void reply_mkdir(struct stat st,fuse_req_t req){
-    struct fuse_entry_param fe;
-    std::memset(&fe, 0, sizeof(fe));
-    fe.attr = st;
-    fe.ino = fe.attr.st_ino;
-    fe.generation = 0;
-    fe.entry_timeout = 1.0;
-    fuse_reply_entry(req, &fe);
-  }
-
-  static void reply_write(size_t ret,fuse_req_t req){
-    if (ret >= 0)
-      fuse_reply_write(req, ret);
-    else
-      fuse_reply_err(req, -ret);
-  }
 
 };
+
+
+static void reply_create_success(struct fuse_file_info* fi,FileHandle* fh,fuse_req_t req,struct stat st){
+  struct fuse_entry_param fe;
+  std::memset(&fe, 0, sizeof(fe));
+
+  fi->fh = reinterpret_cast<uint64_t>(fh);
+  fe.attr = st;
+  fe.ino = fe.attr.st_ino;
+  fe.generation = 0;
+  fe.entry_timeout = 1.0;
+  fuse_reply_create(req, &fe, fi);
+}
+
+static void reply_lookup_success(struct fuse_entry_param fe,fuse_req_t req){
+  fe.ino = fe.attr.st_ino;
+  fe.generation = 0;
+  fuse_reply_entry(req, &fe);
+}
+
+static void reply_readdir(fuse_req_t req,char *buf,size_t ret){
+  if (ret >= 0) {
+    fuse_reply_buf(req, buf, (size_t)ret);
+  } else {
+    //FIXME: ELSE WILL NEVER BE EXECUTED
+    int r = (int)ret;
+    fuse_reply_err(req, -r);
+  }
+}
+
+static void reply_mkdir(struct stat st,fuse_req_t req){
+  struct fuse_entry_param fe;
+  std::memset(&fe, 0, sizeof(fe));
+  fe.attr = st;
+  fe.ino = fe.attr.st_ino;
+  fe.generation = 0;
+  fe.entry_timeout = 1.0;
+  fuse_reply_entry(req, &fe);
+}
+
+static void reply_write(int ret,fuse_req_t req){
+  if (ret >= 0)
+    fuse_reply_write(req, ret);
+  else
+    fuse_reply_err(req, -ret);
+}
+
+static void reply_read(int ret,fuse_req_t req,char *buf){
+  if (ret >= 0)
+    fuse_reply_buf(req, buf, ret);
+  else
+    fuse_reply_err(req, -ret);
+  free(buf);
+}
