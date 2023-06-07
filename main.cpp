@@ -33,9 +33,9 @@
 #include <cstring>
 #include <unistd.h>
 
-#define BLOCK_SIZE 32768
+#define BLOCK_SIZE 4096
 
-  //32768
+//32768
 
 
 
@@ -235,7 +235,6 @@ void RegInode::write(const char* buf, size_t size, off_t offset,fuse_req_t req,s
 
         }
       };
-
     };
     uint64_t prev = bytes_written;
     bytes_written += bytes_to_write;
@@ -1351,6 +1350,7 @@ int FileSystem::open(fuse_ino_t ino, int flags, FileHandle** fhp, uid_t uid, gid
       [[maybe_unused]]auto x = fi;
       [[maybe_unused]]auto temp = reinterpret_cast<FileHandle *>(addr);
       fi->fh = addr;
+      printf("Assigning address in open %lu \n",addr);
       fuse_reply_open(req, fi);
       return 0;
     };
@@ -1359,6 +1359,7 @@ int FileSystem::open(fuse_ino_t ino, int flags, FileHandle** fhp, uid_t uid, gid
 
 ssize_t FileSystem::write(FileHandle* fh, const char* buf, size_t size, off_t off, struct fuse_file_info* fi, fuse_req_t req, int *ptr)
 {
+  //TODO: check if fh->in is null, in this case use the inode tables
   //printf("write offset %ld\n",off);
   cown_ptr<RegInode> reg_inode = fh->in;
   when(reg_inode) << [=](acquired_cown<RegInode> reg_in){

@@ -136,18 +136,18 @@ struct ExternalSource
       res = fuse_session_receive_buf(se, &fbuf);
       //sleep(2);
       if (res == -EINTR) {
-        //free(fbuf->mem);
+        free(fbuf.mem);
         //free(fbuf);
         continue;
       }
       if (res <= 0) {
-        //free(fbuf->mem);
+        free(fbuf.mem);
         //free(fbuf);
         break;
       }
 
-
       fuse_session_process_buf(se, &fbuf);
+
     }
 
 
@@ -167,7 +167,7 @@ void my_session_loop(SystematicTestHarness* harness,struct fuse_session *se)
     harness->external_thread([=]() {
       //fuse_session_loop(se);
       es->my_fuse_session_loop(se);
-      });
+    });
   });
 }
 
@@ -177,7 +177,7 @@ public:
   filesystem_base() {
     std::memset(&ops_, 0, sizeof(ops_));
     ops_.init = ll_init,
-      ops_.create = ll_create;
+    ops_.create = ll_create;
     //ops_.release = ll_release;
     ops_.unlink = ll_unlink;
     ops_.forget = ll_forget;
@@ -425,6 +425,7 @@ private:
 
     //std::cout << "I am thread " << pthread_self() << std::endl;
     //printf("seeing memory at %d\n",*req->buf_mem);
+    printf("Address in write %lu\n",fi->fh);
     fs->write(fh,buf,size,off,fi,req,req->buf_mem);
     //TODO REMOVE AND CHANGE
     //if (ret >= 0)
@@ -446,6 +447,7 @@ private:
     //printf("\nread offset %ld\n",off);
     auto time = std::time(nullptr);
     //printf("req in ll_read %d, time: %d\n",req,time);
+    printf("Adress in read %lu\n",fi->fh);
     fs->read(fh, off, size, req);
     //TODO: REMOVE IT FROM HERE AND PLACE IT IN THE CORRECT POSITION
     //if (ret >= 0)
