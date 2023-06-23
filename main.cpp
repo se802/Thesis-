@@ -8,19 +8,23 @@
  *     ./hello_ll -f /tmp/ssfs
  */
 
-//TODO: SUBMIT REPORT, Fix leaks in all callbacks
+//TODO 2/6/23: SUBMIT REPORT, Fix leaks in all callbacks
 // Fixed: read,write,getattr
-//FIXME: 1. Changed block size (can affect performance)
+// DID 1. Changed block size (can affect performance)
 //       2. Changed fuse_session_loop, dont use when to process_buf
 //       3. Changed libfuse, struct fuse_req now contains a pointer to buf->mem which was leading to leak
 //       4. changed fio to use multiple processes to write to same file --> improved bw https://www.flamingbytes.com/blog/fio-benchmark-on-multiple-files/
 
 
+//FIXME:
+//      1. Change rename and setattr
+//      2. Get rid off FileHandle
+
 #include "main.h"
 
 #include "dirent.h"
 
-#include "fuse3/fuse_opt.h"
+#include <fuse3/fuse_opt.h>
 #include "pthread.h"
 
 #include <cassert>
@@ -51,12 +55,13 @@ struct Block {
   explicit Block(size_t size,int block_number)
   : size(size),block_number(block_number)
     , buf(new char[size]) {
-    //memset(buf.get(),0,size);
+    memset(buf.get(),0,size);
   }
 
-  int block_number = -1;
   size_t size;
+  int block_number = -1;
   std::unique_ptr<char[]> buf;
+
 
   void write(const char* data, uint64_t bytes_to_write, uint64_t block_offset,uint64_t bytes_written) const;
   void read(char* data, uint64_t bytes_to_read, uint64_t block_offset,uint64_t bytes_read) const;
@@ -110,18 +115,17 @@ public:
 
   virtual ~Inode() = 0;
 
-  const fuse_ino_t ino;
+  fuse_ino_t ino;
 
   struct stat i_st;
 
   bool is_regular() const;
-  bool is_directory() const;
-  //bool is_symlink() const;
+
 
   long int krefs = 0;
 
 protected:
-  [[maybe_unused]]FileSystem* fs_;
+  FileSystem* fs_;
 };
 
 class RegInode : public Inode {
@@ -154,9 +158,9 @@ public:
 
   ~RegInode() override;
 
-  void write(const char *buf,size_t size,off_t offset,fuse_req_t req, uint64_t &avail_bytes, int *ptr);
+  void write(const char *buf,size_t size,off_t offset,fuse_req_t req, std::atomic<size_t >&avail_bytes, int *ptr);
   int read(size_t size,off_t offset,fuse_req_t req);
-  int allocate_space(uint64_t blockID, size_t &avail_bytes);
+  int allocate_space(uint64_t blockID, std::atomic<size_t> &avail_bytes);
   std::map<off_t, cown_ptr<Block>> data_blocks;
 };
 
@@ -166,16 +170,16 @@ public:
   u_int64_t count = 0;
 };
 
-int RegInode::allocate_space(uint64_t blockID, size_t &avail_bytes)
+int RegInode::allocate_space(uint64_t blockID, std::atomic<size_t >&avail_bytes)
 {
-  if (avail_bytes < BLOCK_SIZE) return -ENOSPC;
-  avail_bytes -= BLOCK_SIZE;
+  //if (avail_bytes < BLOCK_SIZE) return -ENOSPC;
+  //avail_bytes -= BLOCK_SIZE;
   data_blocks.emplace(blockID, make_cown<Block>(BLOCK_SIZE,blockID));
   return 0;
 }
 
 //FIXME: write never returns an error
-void RegInode::write(const char* buf, size_t size, off_t offset,fuse_req_t req,size_t &avail_bytes, int *ptr)
+void RegInode::write(const char* buf, size_t size, off_t offset,fuse_req_t req,std::atomic<size_t >&avail_bytes, int *ptr)
 {
   //if (count ==1)
   //  printf("aaaaaa\n");
@@ -208,6 +212,7 @@ void RegInode::write(const char* buf, size_t size, off_t offset,fuse_req_t req,s
       //printf("block id %lu -----> new_Block\n",blockId);
 
       int ret = allocate_space(blockId,avail_bytes);
+
       //if (ret){
       //  fuse_reply_err(req,-ret);
       //  exit(-99);
@@ -236,23 +241,13 @@ void RegInode::write(const char* buf, size_t size, off_t offset,fuse_req_t req,s
         }
       };
     };
-    uint64_t prev = bytes_written;
+
     bytes_written += bytes_to_write;
     remaining_size -= bytes_to_write;
-    if(bytes_written> 100000000000000)
-      printf("aaaa");
   }
 }
 
-static int reply_buf_limited(fuse_req_t req, const char *buf, size_t bufsize,
-                             off_t off, size_t maxsize)
-{
-  if (off < bufsize)
-    return fuse_reply_buf(req, buf + off,
-                          std::min(bufsize - off, maxsize));
-  else
-    return fuse_reply_buf(req, NULL, 0);
-}
+
 
 
 
@@ -260,7 +255,7 @@ static int reply_buf_limited(fuse_req_t req, const char *buf, size_t bufsize,
 //FIXME: What if someone does lseek(fd,1000,SEEK_CUR) --> write(fd,"a",1), and someone tries to read from offset 0? what will it return
 int RegInode::read( size_t size, off_t offset, fuse_req_t req)
 {
-  auto time = std::time(nullptr);
+
 
   // Calculate the block ID based on the offset
   u_int64_t bytes_read = 0;
@@ -275,14 +270,7 @@ int RegInode::read( size_t size, off_t offset, fuse_req_t req)
   u_int64_t total = remaining_size;
 
   char *buf = static_cast<char*>(malloc(sizeof(char) * remaining_size));
-  //memset(buf,0,remaining_size);
-
   auto counter = make_cown<Counter>();
-
-
-
-  //printf("In reg inode read, time: %d and remaining size: %d\n",time,remaining_size);
-
   while (remaining_size > 0)
   {
     blockId = (offset + bytes_read) / BLOCK_SIZE;
@@ -307,17 +295,14 @@ int RegInode::read( size_t size, off_t offset, fuse_req_t req)
         //printf("ctr: %d, total: %d\n",ctr->count,total);
         if(ctr->count == total)
         {
-          auto time = std::time(nullptr);
-          //printf("replying kernel: bytes %d, time: %d\n\n",ctr->count,time);
-          //printf("total %d , req: %d buf: %s \n",total,req,buf);
           reply_read(ctr->count,req,buf);
-          //reply_buf_limited(req,buf,total,offset,size);
         }
       };
     };
     bytes_read += bytes_to_read;
     remaining_size -= bytes_to_read;
   }
+  return 0;
   //printf("offset: %ld, bytes_read %lu, size:%zud, bytes_read %lu, file_size: %ld, remaining size %ld\n",offset,bytes_read ,size,bytes_read,i_st.st_size,remaining_size);
 }
 
@@ -327,7 +312,8 @@ int RegInode::read( size_t size, off_t offset, fuse_req_t req)
 
 class DirInode : public Inode {
 public:
-  typedef std::map<std::string, uint64_t> dir_t;
+  //using name = type;
+  using dir_t = std::map<std::string, uint64_t>  ;
 
   DirInode(
     fuse_ino_t &ino,
@@ -365,7 +351,7 @@ public:
 
 bool Inode::is_regular() const { return i_st.st_mode & S_IFREG; }
 
-bool Inode::is_directory() const { return i_st.st_mode & S_IFDIR; }
+//bool Inode::is_directory() const { return i_st.st_mode & S_IFDIR; }
 
 //bool Inode::is_symlink() const { return i_st.st_mode & S_IFLNK; }
 
@@ -389,11 +375,11 @@ struct FileHandle {
   FileHandle(cown_ptr<RegInode> in, int flags)
   : in(in)
     , flags(flags) {}
+
+
 };
 
 
-// TODO: RENAME,RELEASE,FORGET
-// DONE:  READ,WRITE,RMDIR,UNLINK,
 
 class FileSystem : public filesystem_base{
 public:
@@ -425,31 +411,32 @@ public:
   int mkdir(fuse_ino_t parent_ino,const std::string& name,mode_t mode, uid_t uid,gid_t gid, fuse_req_t req) override;
   //int mknod(fuse_ino_t parent_ino,const std::string& name,mode_t mode,dev_t rdev,struct stat* st,uid_t uid,gid_t gid);
   int access(fuse_ino_t ino, int mask, uid_t uid, gid_t gid,fuse_req_t req) override;
-  int setattr(fuse_ino_t ino,FileHandle* fh,struct stat* attr,int to_set,uid_t uid,gid_t gid,fuse_req_t req) override;
+  int setattr(fuse_ino_t ino,FileHandle* fh,struct stat* x,int to_set,uid_t uid,gid_t gid,fuse_req_t req) override;
   int lookup(fuse_ino_t parent_ino, const std::string& name,fuse_req_t req) override;
   void init(void *userdata,struct fuse_conn_info *conn) override;
   int open(fuse_ino_t ino, int flags, FileHandle** fhp, uid_t uid, gid_t gid,  struct fuse_file_info* fi,fuse_req_t req) override;
-  ssize_t write(FileHandle* fh, const char * buf, size_t size, off_t off, struct fuse_file_info *fi,fuse_req_t req,int * ptr) override;
-  ssize_t read(FileHandle* fh, off_t offset, size_t size,fuse_req_t req) override;
-  int unlink(fuse_ino_t parent_ino, const std::string& name, uid_t uid, gid_t gid,fuse_req_t req);
-  int rmdir(fuse_ino_t parent_ino, const std::string& name, uid_t uid, gid_t gid,fuse_req_t req);
-  void forget(fuse_ino_t ino, long unsigned nlookup,fuse_req_t req);
-  int rename(fuse_ino_t acq_old_parent_in,const std::string& oldname,fuse_ino_t newparent_ino,const std::string& dupl_reg_in,uid_t uid,gid_t dupl_dir_in,fuse_req_t req);
-  int opendir(fuse_ino_t ino, int flags, uid_t uid, gid_t gid,fuse_req_t req,struct fuse_file_info *fi);
+  ssize_t write(FileHandle* fh, const char * buf, size_t size, off_t off, struct fuse_file_info *fi,fuse_req_t req,int * ptr, fuse_ino_t ino) override;
+  ssize_t read(FileHandle* fh, off_t offset, size_t size,fuse_req_t req, fuse_ino_t ino) override;
+  int unlink(fuse_ino_t parent_ino, const std::string& name, uid_t uid, gid_t gid,fuse_req_t req) override;
+  int rmdir(fuse_ino_t parent_ino, const std::string& name, uid_t uid, gid_t gid,fuse_req_t req) override;
+  void forget(fuse_ino_t ino, long unsigned nlookup,fuse_req_t req) override;
+  int rename(fuse_ino_t acq_old_parent_in,const std::string& oldname,fuse_ino_t newparent_ino,const std::string& dupl_reg_in,uid_t uid,gid_t dupl_dir_in,fuse_req_t req) override;
+  int opendir(fuse_ino_t ino, int flags, uid_t uid, gid_t gid,fuse_req_t req,struct fuse_file_info *fi) override;
+  void release(fuse_ino_t ino, FileHandle* fh) override;
+  void my_fallocate(fuse_req_t req, fuse_ino_t ino, int mode,off_t offset, off_t length, fuse_file_info *fi) override;
   // helper functions
 private:
-
+  void replace_entry_same_parent(uint64_t  uid,cown_ptr<DirInode> old_parent_inode,acquired_cown<DirInode> &acq_old_parent_in,std::string newname, std::map<std::basic_string<char>, uint64_t>::iterator old_entry,fuse_req_t req );
+  void replace_entry(cown_ptr<DirInode> old_parent_inode,cown_ptr<DirInode> new_parent_inode,uint64_t  uid,acquired_cown<DirInode> &acq_old_parent_in,acquired_cown<DirInode> &acq_new_parent_in,std::string newname,std::map<std::basic_string<char>, uint64_t>::iterator old_entry,fuse_req_t req);
   void free_space(acquired_cown<Block> &blk);
   int truncate(acquired_cown<RegInode> &in, off_t newsize, uid_t uid, gid_t gid);
 
-  void add_inode(cown_ptr<DirInode> inode);
-  void add_inode(cown_ptr<RegInode> inode);
+  void add_inode(cown_ptr<DirInode> inode,struct stat st);
+  void add_inode(cown_ptr<RegInode> inode,struct stat st);
 
   static void get_inode(const cown_ptr<RegInode>& inode_cown, acquired_cown<RegInode> &acq_inode,  acquired_cown<std::unordered_map<fuse_ino_t, cown_ptr<RegInode>>> &regular_inode_table);
   static void get_inode(const cown_ptr<DirInode>& in_cown, acquired_cown<DirInode> &acq_inode,  acquired_cown<std::unordered_map<fuse_ino_t, cown_ptr<DirInode>>> &dir_inode_table);
 
-  static void put_inode(const cown_ptr<RegInode>& inode_cown, acquired_cown<RegInode> &acq_inode,  acquired_cown<std::unordered_map<fuse_ino_t, cown_ptr<RegInode>>> &regular_inode_table);
-  static void put_inode(const cown_ptr<DirInode>& in_cown, acquired_cown<DirInode> &acq_inode,  acquired_cown<std::unordered_map<fuse_ino_t, cown_ptr<DirInode>>> &dir_inode_table);
 
 
   // private fields;
@@ -463,15 +450,13 @@ private:
 private:
   std::atomic<fuse_ino_t> next_ino_;
   //FIXME, SHOULD BE ATOMIC
-  size_t avail_bytes_;
+  std::atomic<size_t> avail_bytes_;
   struct statvfs stat;
   cown_ptr<DirInode> root;
 
 };
 
-// Implementation
 
-//TODO: REMAINING OPERATIONS ARE: RELEASE,READ,WRITE--ALMOST DONE,RENAME,UNLINK,RMDIR,FORGET
 
 void FileSystem::init_stat(fuse_ino_t ino, time_t time, uid_t uid, gid_t gid, blksize_t blksize, mode_t mode,struct stat *i_st,bool is_regular)
 {
@@ -496,19 +481,23 @@ void FileSystem::init_stat(fuse_ino_t ino, time_t time, uid_t uid, gid_t gid, bl
 }
 
 
-void FileSystem::add_inode(cown_ptr<DirInode> ino)
+void FileSystem::add_inode(cown_ptr<DirInode> ino,struct stat st)
 {
   when(ino,dir_inode_table) << [=](acquired_cown<DirInode> inode,auto table){
     assert(inode->krefs == 0);
+    inode->i_st = st;
+    inode->ino = st.st_ino;
     inode->krefs++;
     [[maybe_unused]] auto res = table->emplace(inode->ino, ino);
   };
 }
 
-void FileSystem::add_inode(cown_ptr<RegInode> ino)
+void FileSystem::add_inode(cown_ptr<RegInode> ino,struct stat st)
 {
   when(ino,regular_inode_table) << [=](acquired_cown<RegInode> inode,auto table){
     assert(inode->krefs == 0);
+    inode->i_st = st;
+    inode->ino = st.st_ino;
     inode->krefs++;
     [[maybe_unused]] auto res = table->emplace(inode->ino, ino);
   };
@@ -544,6 +533,7 @@ FileSystem::FileSystem(size_t size): next_ino_(FUSE_ROOT_ID) {
   //printf("node id is :%lu\n",node_id);
 
   root = make_cown<DirInode>(node_id, now, getuid(), getgid(), BLOCK_SIZE, 0755, this);
+
   avail_bytes_ = size;
 
   memset(&stat, 0, sizeof(stat));
@@ -575,78 +565,80 @@ FileSystem::FileSystem(size_t size): next_ino_(FUSE_ROOT_ID) {
 
 void FileSystem::init(void* userdata, struct fuse_conn_info* conn)
 {
-  add_inode(root);
+  //auto node_id = reinterpret_cast<uint64_t > (root.allocated_cown);
 
-
-  if(conn->capable & FUSE_CAP_PARALLEL_DIROPS)
-    conn->want |= FUSE_CAP_PARALLEL_DIROPS;
-
-  if(conn->capable & FUSE_CAP_ASYNC_READ)
-    conn->want |= FUSE_CAP_ASYNC_READ;
-  //
-  if (conn->capable & FUSE_CAP_WRITEBACK_CACHE)
-    conn->want |= FUSE_CAP_WRITEBACK_CACHE;
-  //
-  if(conn->capable & FUSE_CAP_ASYNC_DIO)
-    conn->want |= FUSE_CAP_ASYNC_DIO;
-
-  if (conn->capable & FUSE_CAP_SPLICE_WRITE)
-    conn->want |= FUSE_CAP_SPLICE_WRITE;
-
-  if (conn->capable & FUSE_CAP_SPLICE_READ)
-    conn->want |= FUSE_CAP_SPLICE_READ;
-
-
+  struct stat i_st{};
+  init_stat(1, std::time(nullptr), getuid(), getgid(), BLOCK_SIZE, 0755,&i_st, false);
+  add_inode(root,i_st);
 }
 
 int FileSystem::lookup(fuse_ino_t parent_ino, const std::string& name, fuse_req_t req)
 {
 
-  when(dir_inode_table) << [=](auto dir_table){
+  //std::cout << "in lookup for ino " << parent_ino << std::endl;
+  //while(1);
+  cown_ptr<DirInode> parent_in = nullptr;
+  if(parent_ino == 1)
+    parent_in = root;
+  else{
+    auto it = reinterpret_cast<ActualCown<DirInode> *>(parent_ino);
+    it->acquire_strong_from_weak();
+    parent_in = cown_ptr<DirInode>(it);
+  }
+
+  when(parent_in) << [=](auto  parent_in){
+    auto iter = parent_in->dentries.find(name);
+    if (iter == parent_in->dentries.end()) {
+      //log_->debug("lookup parent {} name {} not found", parent_ino, name);
+      reply_fail(-ENOENT, req);
+      return -ENOENT;
+    }
+
+    auto in = iter->second;
 
 
-    cown_ptr<DirInode> parent_in = dir_table->at(parent_ino);
-    when(parent_in) << [=](auto  parent_in){
-      auto it = parent_in->dentries.find(name);
-      if (it == parent_in->dentries.end()) {
-        //log_->debug("lookup parent {} name {} not found", parent_ino, name);
-        reply_fail(-ENOENT,req);
-        return -ENOENT;
-      }
-
-      auto in = it->second;
-      when(regular_inode_table,dir_inode_table) << [req,in, this](auto reg_table,auto dir_table){
-        //TODO Maybe check that inode indeed exists otherwise return ENOENT
-
-        if( reg_table->find(in) != reg_table->end()){
-          auto inode = reg_table->at(in);
-          when(inode,regular_inode_table) << [req,inode](acquired_cown<RegInode> acq_inode,auto  reg_table){
-            get_inode(inode,acq_inode,reg_table);
-            struct fuse_entry_param fe;
-            std::memset(&fe, 0, sizeof(struct fuse_entry_param));
-            fe.attr = acq_inode->i_st;
-            reply_lookup_success(fe,req);
-            return 0;
-          };
-        }
 
 
-        if(dir_table->find(in) != dir_table->end()){
-          auto inode = dir_table->at(in);
-          when(inode,dir_inode_table) << [req,inode](acquired_cown<DirInode> acq_inode,auto  dir_table){
-            get_inode(inode,acq_inode,dir_table);
-            struct fuse_entry_param fe;
-            std::memset(&fe, 0, sizeof(fe));
-            fe.attr = acq_inode->i_st;
-            reply_lookup_success(fe,req);
-            return 0;
-          };
-        }
-
+    // check inode is regular inode
+    if(in%2==1){
+      in--;
+      auto it = reinterpret_cast<ActualCown<RegInode> *>(in);
+      it->acquire_strong_from_weak();
+      cown_ptr<RegInode> inode = cown_ptr<RegInode>(it);
+      when(inode,regular_inode_table) << [=](acquired_cown<RegInode> acq_inode,auto  reg_table){
+        get_inode(inode,acq_inode,reg_table);
+        struct fuse_entry_param fe{};
+        std::memset(&fe, 0, sizeof(struct fuse_entry_param));
+        fe.attr = acq_inode->i_st;
+        reply_lookup_success(fe,req);
+        return 0;
       };
-
-    };
+    }else{
+      cown_ptr<DirInode> inode = nullptr;
+      if(in == 1)
+        inode = root;
+      else{
+        auto it = reinterpret_cast<ActualCown<DirInode> *>(in);
+        it->acquire_strong_from_weak();
+        inode = cown_ptr<DirInode>(it);
+      }
+      when(inode,dir_inode_table) << [=](acquired_cown<DirInode> acq_inode,auto  dir_table){
+        get_inode(inode,acq_inode,dir_table);
+        struct fuse_entry_param fe{};
+        std::memset(&fe, 0, sizeof(fe));
+        fe.attr = acq_inode->i_st;
+        reply_lookup_success(fe,req);
+        return 0;
+      };
+    }
+    return 0;
   };
+  return 0;
+}
+
+void FileSystem::release(fuse_ino_t ino, FileHandle* fh)
+{
+  delete fh;
 }
 
 int FileSystem::access(struct stat i_st, int mask, uid_t uid, gid_t gid) {
@@ -698,10 +690,13 @@ int FileSystem::access(struct stat i_st, int mask, uid_t uid, gid_t gid) {
   assert(0);
 }
 
-int FileSystem::create(fuse_ino_t parent_ino, const std::string& name, mode_t mode, int flags, uid_t uid, gid_t gid, fuse_req_t req, struct fuse_file_info* fi)
+int FileSystem::create(fuse_ino_t parent_ino, const std::string& name, mode_t mode, int flags, uid_t uid, gid_t gid, fuse_req_t req, struct fuse_file_info* fi2)
 {
   //fi->direct_io = 1;
-  fi->parallel_direct_writes = 1;
+  struct fuse_file_info fi{};
+  fi.parallel_direct_writes = 1;
+  fi.direct_io = 1;
+  fi.fh = 1;
   //printf("Setting direct writes");
   if(name.length() > NAME_MAX){
     std::cout << "name: " << name << "is too long" << std::endl;
@@ -711,133 +706,156 @@ int FileSystem::create(fuse_ino_t parent_ino, const std::string& name, mode_t mo
 
   auto now = std::time(nullptr);
 
+  cown_ptr<DirInode> parent_in = nullptr;
+  if(parent_ino==1)
+    parent_in = root;
+  else
+  {
+    auto it = reinterpret_cast<ActualCown<DirInode> *>(parent_ino);
+    it->acquire_strong_from_weak();
+    parent_in = cown_ptr<DirInode>(it);
+  }
+
+  when(parent_in) << [=](acquired_cown<DirInode> parent_in){
 
 
-  // First acquires directory_inode_table which is a cown
-  // then acquire DirInode which is also a cown and adds an entry to it
-  // also add inode to reg inode table
-  when(dir_inode_table) << [=](auto dir_table){
-    cown_ptr<DirInode> parent_in = dir_table->at(parent_ino);
-    when(parent_in) << [=](acquired_cown<DirInode> parent_in){
+    fuse_ino_t  node_id;
+    cown_ptr<RegInode> in = make_cown<RegInode>(node_id, now, uid, gid, BLOCK_SIZE, S_IFREG | mode, this);
+    node_id =  reinterpret_cast<uint64_t>(in.allocated_cown) + 1;
+    struct stat i_st{};
+    init_stat(node_id,now,uid,gid,BLOCK_SIZE,S_IFREG | mode,&i_st, true);
 
+    auto fh = std::make_unique<FileHandle>(in, flags);
+    DirInode::dir_t& children = parent_in->dentries;
 
-      fuse_ino_t node_id = 0;
-      auto in = make_cown<RegInode>(node_id, now, uid, gid, BLOCK_SIZE, S_IFREG | mode, this);
-      struct stat i_st;
-      init_stat(node_id,now,uid,gid,BLOCK_SIZE,S_IFREG | mode,&i_st, true);
+    if (children.find(name) != children.end()) {
+      std::cout << "create name" << name << " already exists" << std::endl;
+      reply_fail(-EEXIST, req);
+      //exit(-99);
+      return -EEXIST;
+    }
 
-      auto fh = std::make_unique<FileHandle>(in, flags);
-      DirInode::dir_t& children = parent_in->dentries;
+    int ret = access(parent_in->i_st, W_OK, uid, gid);
+    if (ret) {
+      //log_->debug("create name {} access denied ret {}", name, ret);
+      reply_fail(ret, req);
+      //exit(-99);
+      return ret;
+    }
 
-      if (children.find(name) != children.end()) {
-        std::cout << "create name" << name << " already exists" << std::endl;
-        reply_fail(-EEXIST, req);
-        //exit(-99);
-        return -EEXIST;
-      }
+    //printf("Reg Inode is %lu\n",node_id);
+    children[name]= reinterpret_cast<uint64_t >(node_id) ;
+    add_inode(in,i_st);
 
-      int ret = access(parent_in->i_st, W_OK, uid, gid);
-      if (ret) {
-        //log_->debug("create name {} access denied ret {}", name, ret);
-        reply_fail(ret, req);
-        //exit(-99);
-        return ret;
-      }
+    parent_in->i_st.st_ctime = now;
+    parent_in->i_st.st_mtime = now;
 
-      children[name]= node_id;
-      add_inode(in);
+    //printf("Direct writes are %d",fi.parallel_direct_writes);
 
-      parent_in->i_st.st_ctime = now;
-      parent_in->i_st.st_mtime = now;
+    struct fuse_file_info copy = fi;
+    copy.fh = reinterpret_cast<uint64_t>(fh.release());
 
-
-      FileHandle* fhp = fh.release();
-      reply_create_success(fi,fhp,req,i_st);
-    };
+    reply_create_success(&copy,NULL,req,i_st);
+    return 0;
   };
-
+  return 0;
 }
 
 ssize_t FileSystem::readdir(fuse_req_t req, fuse_ino_t parent_ino, size_t bufsize, off_t toff)
 {
   // Again same pattern, first acquire dir_inode_table
   // then dir inode and then iterate through its entries
-  when(dir_inode_table) << [=](auto dir_table){
-    size_t off = toff;
-    auto temp = std::unique_ptr<char[]>(new char[bufsize]);
-    char *buf = temp.get();
+
+  size_t off = toff;
+  char *buf = new char[bufsize];
 
 
-    size_t pos = 0;
+  size_t pos = 0;
 
-    /*
-     * FIXME: the ".." directory correctly shows up at the parent directory
-     * inode, but "." shows a inode number as "?" with ls -lia.
-     */
-    if (off == 0) {
-      size_t remaining = bufsize - pos;
-      struct stat st;
-      memset(&st, 0, sizeof(struct stat));
-      st.st_ino = 1;
-      size_t used = fuse_add_direntry(req, buf + pos, remaining, ".", &st, 1);
-      if (used > remaining){
-        reply_readdir(req,buf,pos);
-        return pos;
-      }
-      //printf("Str %s",buf+pos);
-      pos += used;
-      off = 1;
+  /*
+   * FIXME: the ".." directory correctly shows up at the parent directory
+   * inode, but "." shows a inode number as "?" with ls -lia.
+   */
+  if (off == 0) {
+    size_t remaining = bufsize - pos;
+    struct stat st{};
+    memset(&st, 0, sizeof(struct stat));
+    st.st_ino = 1;
+    size_t used = fuse_add_direntry(req, buf + pos, remaining, ".", &st, 1);
+    if (used > remaining){
+      fuse_reply_buf(req, buf, pos);
+      free(buf);
+      return pos;
     }
+    //printf("Str %s",buf+pos);
+    pos += used;
+    off = 1;
+  }
 
 
 
-    if (off == 1) {
-      size_t remaining = bufsize - pos;
-      struct stat st;
-      memset(&st, 0, sizeof(struct stat));
-      st.st_ino = 1;
-      size_t used = fuse_add_direntry(
-        req, buf + pos, remaining, "..", &st, 2);
-      if (used > remaining) {
-        reply_readdir(req,buf,pos);
-        return pos;
-      }
-      //printf("Str %s",buf+pos);
-      pos += used;
-      off = 2;
+  if (off == 1) {
+    size_t remaining = bufsize - pos;
+    struct stat st{};
+    memset(&st, 0, sizeof(struct stat));
+    st.st_ino = 1;
+    size_t used = fuse_add_direntry(
+      req, buf + pos, remaining, "..", &st, 2);
+    if (used > remaining) {
+      fuse_reply_buf(req, buf, pos);
+      free(buf);
+      return pos;
     }
+    pos += used;
+    off = 2;
+  }
 
-    assert(off >= 2);
-    cown_ptr<DirInode> parent_in = dir_table->at(parent_ino);
-    when(parent_in) << [=](auto acq_parent_in){
-      auto cp_pos = pos;
-      auto cp_off = off;
-      DirInode::dir_t& children = acq_parent_in->dentries;
 
-      size_t count = 0;
-      size_t target = cp_off - 2;
+  assert(off >= 2);
 
-      for (auto & it : children) {
-        if (count >= target) {
-          auto in = it.second;
-          struct stat st;
-          memset(&st, 0, sizeof(struct stat ));
-          st.st_ino = in;
-          size_t remaining = bufsize - cp_pos;
-          size_t used = fuse_add_direntry(
-            req, buf + cp_pos, remaining, it.first.c_str(), &st, cp_off + 1);
-          if (used > remaining){
-            reply_readdir(req,buf,cp_pos);
-            return cp_pos;
-          }
-          cp_pos += used;
-          cp_off++;
+  //std::cout << "ino is " << parent_ino << std::endl;
+
+  cown_ptr<DirInode> parent_in = nullptr;
+  if(parent_ino==1)
+    parent_in = root;
+  else
+  {
+    auto it = reinterpret_cast<ActualCown<DirInode> *>(parent_ino);
+    it->acquire_strong_from_weak();
+    parent_in = cown_ptr<DirInode>(it);
+  }
+  when(parent_in) << [=](auto acq_parent_in){
+    auto cp_pos = pos;
+    auto cp_off = off;
+    DirInode::dir_t& children = acq_parent_in->dentries;
+
+    size_t count = 0;
+    size_t target = cp_off - 2;
+
+    for (auto & it : children) {
+      if (count >= target) {
+        auto in = it.second;
+        struct stat st;
+        memset(&st, 0, sizeof(struct stat ));
+        st.st_ino = in;
+        size_t remaining = bufsize - cp_pos;
+        size_t used = fuse_add_direntry(
+          req, buf + cp_pos, remaining, it.first.c_str(), &st, cp_off + 1);
+        if (used > remaining){
+          fuse_reply_buf(req, buf, (size_t)cp_pos);
+          free(buf);
+          return cp_pos;
         }
-        count++;
+        cp_pos += used;
+        cp_off++;
       }
-      reply_readdir(req,buf,cp_pos);
-    };
+      count++;
+    }
+    fuse_reply_buf(req, buf,cp_pos);
+    free(buf);
+    return (size_t)0;
   };
+  return 0;
 }
 
 
@@ -845,74 +863,37 @@ ssize_t FileSystem::readdir(fuse_req_t req, fuse_ino_t parent_ino, size_t bufsiz
 
 int FileSystem::getattr(fuse_ino_t ino, uid_t uid, gid_t gid, fuse_req_t req,int *ptr)
 {
+  //std::cout << "getattr1: ino is " << ino << std::endl;
 
-  //int *temp = ptr;
-  //Inode * inode = reinterpret_cast<Inode*>(ino);
-  //if(ino!=1 && inode->is_regular()){
-  //  when(regular_inode_table) << [=](auto reg_table){
-  //    auto it = reg_table->find(ino);
-  //    if(it != reg_table->end()){
-  //      cown_ptr<RegInode> regInode = it->second;
-  //      when(regInode) << [=](acquired_cown<RegInode> reg_ino){
-  //        struct stat st = reg_ino->i_st;
-  //        fuse_reply_attr(req, &st, 0);
-  //        //printf("Address is %p\n",ptr);
-  //        free(temp);
-  //      };
-  //    }
-  //  };
-  //}
-  //else{
-  //  when(dir_inode_table) << [=](auto dir_table){
-  //    auto it = dir_table->find(ino);
-  //    if(it != dir_table->end()){
-  //      cown_ptr<DirInode> dirInode = it->second;
-  //      when(dirInode) << [req, ptr](acquired_cown<DirInode> dirInode){
-  //        struct stat st = dirInode->i_st;
-  //        fuse_reply_attr(req, &st, 0);
-  //        //printf("Adress is %p\n",ptr);
-  //        free(ptr);
-  //      };
-  //    }
-  //  };
-  //}
-  //
-  //return 0;
-
-
-  if(ino!=1){
-    //when()<<[=](){};
-    Inode *inode = reinterpret_cast<Inode*>(ino);
-    fuse_reply_attr(req, &inode->i_st, 0);
-    free(ptr);
-  }else{
-    when(dir_inode_table,regular_inode_table) << [=](auto dir_table,auto reg_table){
-
-      auto it = dir_table->find(ino);
-      if(it != dir_table->end()){
-        cown_ptr<DirInode> dirInode = it->second;
-        when(dirInode) << [=](acquired_cown<DirInode> dir_ino){
-          struct stat st = dir_ino->i_st;
-          fuse_reply_attr(req, &st, 0);
-          free(ptr);
-        };
-      }
-      else{
-        auto it = reg_table->find(ino);
-        if(it != reg_table->end()){
-          cown_ptr<RegInode> regInode = it->second;
-          when(regInode) << [=](acquired_cown<RegInode> reg_ino){
-            struct stat st = reg_ino->i_st;
-            fuse_reply_attr(req, &st, 0);
-            free(ptr);
-          };
-        }
-      }
-
+  if(ino==1 || ino%2==0){
+    cown_ptr<DirInode> dirInode = nullptr;
+    if(ino==1)
+      dirInode = root;
+    else
+    {
+      auto it = reinterpret_cast<ActualCown<DirInode> *>(ino);
+      it->acquire_strong_from_weak();
+      dirInode = cown_ptr<DirInode>(it);
+    }
+    when(dirInode) << [=](acquired_cown<DirInode> dirInode){
+      //std::cout << "getattr2: ino is " << ino << std::endl;
+      struct stat st = dirInode->i_st;
+      fuse_reply_attr(req, &st, 0);
+      free(ptr);
     };
   }
-
-
+  else if(ino%2==1){
+    ino--;
+    auto it = reinterpret_cast<ActualCown<RegInode> *>(ino);
+    it->acquire_strong_from_weak();
+    cown_ptr<RegInode> regInode = cown_ptr<RegInode>(it);
+    when(regInode) << [=](acquired_cown<RegInode> reg_ino){
+      struct stat st = reg_ino->i_st;
+      fuse_reply_attr(req, &st, 0);
+      free(ptr);
+    };
+  }
+  return 0;
 }
 
 int FileSystem::setattr(fuse_ino_t ino, FileHandle* fh, struct stat* x, int to_set, uid_t uid, gid_t gid, fuse_req_t req)
@@ -920,12 +901,12 @@ int FileSystem::setattr(fuse_ino_t ino, FileHandle* fh, struct stat* x, int to_s
 
   //Case where it's a regular inode
   struct stat attr = *x;
-  when(regular_inode_table) << [=](auto reg_table){
-    auto it = reg_table->find(ino);
-    if(it == reg_table->end())
-      return -1;
-    cown_ptr<RegInode> reg_inode =  reg_table->at(ino);
-    when(reg_inode,regular_inode_table) << [=]( acquired_cown<RegInode> reg_inode,auto){
+
+  if(ino%2==1){
+    auto allocated_cown = reinterpret_cast<ActualCown<RegInode>*>(ino-1);
+    allocated_cown->acquire_strong_from_weak();
+    cown_ptr<RegInode> reg_inode = cown_ptr<RegInode>(allocated_cown);
+    when(reg_inode) << [=]( acquired_cown<RegInode> reg_inode){
 
       mode_t clear_mode = 0;
       auto now = std::time(nullptr);
@@ -942,13 +923,13 @@ int FileSystem::setattr(fuse_ino_t ino, FileHandle* fh, struct stat* x, int to_s
 
       if (to_set & (FUSE_SET_ATTR_UID | FUSE_SET_ATTR_GID)) {
         /*
-         * Only  a  privileged  process  (Linux: one with the CAP_CHOWN
-         * capability) may change the owner of a file.  The owner of a file may
-         * change the group of the file to any group of which that owner is a
-         * member.  A privileged process (Linux: with CAP_CHOWN) may change the
-         * group arbitrarily.
-         *
-         * TODO: group membership for owner is not enforced.
+       * Only  a  privileged  process  (Linux: one with the CAP_CHOWN
+       * capability) may change the owner of a file.  The owner of a file may
+       * change the group of the file to any group of which that owner is a
+       * member.  A privileged process (Linux: with CAP_CHOWN) may change the
+       * group arbitrarily.
+       *
+       * TODO: group membership for owner is not enforced.
          */
         if (
           uid && (to_set & FUSE_SET_ATTR_UID)
@@ -1028,8 +1009,7 @@ int FileSystem::setattr(fuse_ino_t ino, FileHandle* fh, struct stat* x, int to_s
         assert(reg_inode->is_regular());
 
 
-        //TODO implement truncate
-        //auto reg_in = std::dynamic_pointer_cast<RegInode>(in);
+
         int ret = truncate(reg_inode, attr.st_size, uid, gid);
         if (ret < 0) {
           reply_fail(ret,req);
@@ -1045,15 +1025,15 @@ int FileSystem::setattr(fuse_ino_t ino, FileHandle* fh, struct stat* x, int to_s
       fuse_reply_attr(req, &reg_inode->i_st, 0);
       return 0;
     };
-  };
-
+  }
 
   //Case where it's a dir inode
-  when(dir_inode_table) << [=](auto dir_table){
-    auto it = dir_table->find(ino);
-    if(it == dir_table->end())
-      return -1;
-    cown_ptr<DirInode> dir_inode =  dir_table->at(ino);
+  if(ino==1 || ino%2==0){
+    auto it = reinterpret_cast<ActualCown<DirInode> *>(ino);
+    it->acquire_strong_from_weak();
+    cown_ptr<DirInode> dir_inode = cown_ptr<DirInode>(it);
+
+
     when(dir_inode,dir_inode_table) << [=]( acquired_cown<DirInode> reg_inode,auto ){
 
       mode_t clear_mode = 0;
@@ -1176,34 +1156,21 @@ int FileSystem::setattr(fuse_ino_t ino, FileHandle* fh, struct stat* x, int to_s
       return 0;
     };
   };
-
+  return 0;
 }
 // virtual int opendir(fuse_ino_t ino, int flags, uid_t uid, gid_t gid,fuse_req_t req,struct fuse_file_info *fi)
 int FileSystem::opendir(fuse_ino_t ino, int flags, uid_t uid, gid_t gid, fuse_req_t req,struct fuse_file_info *fi)
 {
-  when(regular_inode_table) << [=](auto reg_table) {
-    auto it = reg_table->find(ino);
-    if (it == reg_table->end())
-      return -1;
-
-    auto in = it->second;
-    when(in) << [=](auto reg_in) {
-      if ((flags & O_ACCMODE) == O_RDONLY)
-      {
-        int ret = access(reg_in->i_st, R_OK, uid, gid);
-        if (ret)
-          return ret;
-      }
-      fuse_reply_open(req,fi);
-    };
-  };
-
-  when(dir_inode_table) << [=](auto dir_table){
-
-    auto it = dir_table->find(ino);
-    if(it == dir_table->end()) return -1;
-
-    auto in = it->second;
+  if(ino==1 || ino%2==0){
+    cown_ptr<DirInode> in = nullptr;
+    if(ino==1)
+      in = root;
+    else
+    {
+      auto it = reinterpret_cast<ActualCown<DirInode> *>(ino);
+      it->acquire_strong_from_weak();
+      in = cown_ptr<DirInode>(it);
+    }
     when(in) << [=](auto dir_in){
       if ((flags & O_ACCMODE) == O_RDONLY) {
         int ret = access(dir_in->i_st, R_OK, uid, gid);
@@ -1212,12 +1179,28 @@ int FileSystem::opendir(fuse_ino_t ino, int flags, uid_t uid, gid_t gid, fuse_re
           return ret;
         }
       }
+      //printf("Direct writes var is %d\n",fi->parallel_direct_writes);
+
       fuse_reply_open(req,fi);
+      return 0;
     };
-
-  };
-
-
+  }
+  else{
+    ino--;
+    auto it = reinterpret_cast<ActualCown<RegInode> *>(ino);
+    it->acquire_strong_from_weak();
+    cown_ptr<RegInode> regInode = cown_ptr<RegInode>(it);
+    when(regInode) << [=](auto reg_in) {
+      if ((flags & O_ACCMODE) == O_RDONLY)
+      {
+        int ret = access(reg_in->i_st, R_OK, uid, gid);
+        if (ret)
+          return ret;
+      }
+      fuse_reply_open(req,fi);
+      return 0;
+    };
+  }
 
   return 0;
 }
@@ -1225,27 +1208,34 @@ int FileSystem::opendir(fuse_ino_t ino, int flags, uid_t uid, gid_t gid, fuse_re
 
 int FileSystem::access(fuse_ino_t ino, int mask, uid_t uid, gid_t gid, fuse_req_t req)
 {
-  when(regular_inode_table) << [=](auto reg_table){
-    auto it = reg_table->find(ino);
-    if(it != reg_table->end()){
-      cown_ptr<RegInode> reg_inode =  reg_table->at(ino);
-      when(regular_inode_table,reg_inode) << [=](auto reg_table,auto reg_inode){
-        int ret = access(reg_inode->i_st, mask, uid, gid);
-        fuse_reply_err(req, -ret);
-      };
+  std::cout << " in access" << std::endl;
+  if(ino==1 || ino%2==0){
+    std::cout << " in if access" << std::endl;
+    cown_ptr<DirInode> dir_inode = nullptr;
+    if(ino==1){
+      dir_inode = root;
+    }else{
+      auto it = reinterpret_cast<ActualCown<DirInode> *>(ino);
+      it->acquire_strong_from_weak();
+      dir_inode = cown_ptr<DirInode>(it);
     }
-  };
-
-  when(dir_inode_table) << [=](auto dir_table){
-    auto it = dir_table->find(ino);
-    if(it != dir_table->end()){
-      cown_ptr<DirInode> dir_inode =  dir_table->at(ino);
-      when(dir_inode_table,dir_inode) << [=](auto dir_table,auto dir_inode){
-        int ret = access(dir_inode->i_st, mask, uid, gid);
-        fuse_reply_err(req, -ret);
-      };
-    }
-  };
+    when(dir_inode) << [=](auto dir_inode){
+      int ret = access(dir_inode->i_st, mask, uid, gid);
+      std::cout << "replying kernel" << std::endl;
+      fuse_reply_err(req, -ret);
+    };
+  }else{
+    std::cout << " in else access" << std::endl;
+    ino--;
+    auto allocated_cown = reinterpret_cast<ActualCown<RegInode>*>(ino);
+    allocated_cown->acquire_strong_from_weak();
+    cown_ptr<RegInode> reg_inode = cown_ptr<RegInode>(allocated_cown);
+    when(reg_inode) << [=]( auto reg_inode){
+      int ret = access(reg_inode->i_st, mask, uid, gid);
+      fuse_reply_err(req, -ret);
+    };
+  }
+  return 0;
 }
 
 int FileSystem::mkdir(fuse_ino_t parent_ino, const std::string& name, mode_t mode, uid_t uid, gid_t gid, fuse_req_t req)
@@ -1259,42 +1249,56 @@ int FileSystem::mkdir(fuse_ino_t parent_ino, const std::string& name, mode_t mod
   // First acquires directory_inode_table which is a cown
   // then acquire parent DirInode which is also a cown and adds an entry
   // also add inode to dir inode table
-  when(dir_inode_table) << [=](auto dir_table) {
-    cown_ptr<DirInode> parent_in = dir_table->at(parent_ino);
-    when(parent_in) << [=](auto parent_in){
-      DirInode::dir_t& children = parent_in->dentries;
-      if (children.find(name) != children.end()) {
-        const int ret = -EEXIST;
-        reply_fail(ret,req);
-        return ret;
-      }
-      int ret = access(parent_in->i_st, W_OK, uid, gid);
-      if (ret) {
-        reply_fail(ret,req);
-        return ret;
-      }
 
-      fuse_ino_t node_id = 0;
-      struct stat i_st{};
-      cown_ptr<DirInode> in = make_cown<DirInode>(node_id, now, uid, gid, BLOCK_SIZE, mode, this);
-      init_stat(node_id, now, uid, gid, BLOCK_SIZE, mode,&i_st, false);
-      children[name] = node_id;
-      add_inode(in);
+  cown_ptr<DirInode> parent_in = nullptr;
+  if(parent_ino==1){
+    parent_in = root;
+  }else{
+    auto it = reinterpret_cast<ActualCown<DirInode> *>(parent_ino);
+    it->acquire_strong_from_weak();
+    parent_in = cown_ptr<DirInode>(it);
+  }
 
-      parent_in->i_st.st_ctime = now;
-      parent_in->i_st.st_mtime = now;
-      parent_in->i_st.st_nlink++;
+  when(parent_in) << [=](auto parent_in){
+    DirInode::dir_t& children = parent_in->dentries;
+    if (children.find(name) != children.end()) {
+      const int ret = -EEXIST;
+      reply_fail(ret,req);
+      return ret;
+    }
+    int ret = access(parent_in->i_st, W_OK, uid, gid);
+    if (ret) {
+      reply_fail(ret,req);
+      return ret;
+    }
 
-      reply_mkdir(i_st,req);
-      return 0;
-    };
+    fuse_ino_t node_id = 0;
+    struct stat i_st{};
+    cown_ptr<DirInode> in = make_cown<DirInode>(node_id, now, uid, gid, BLOCK_SIZE, mode, this);
+    node_id = reinterpret_cast<uint64_t > (in.allocated_cown);
+    init_stat(node_id, now, uid, gid, BLOCK_SIZE, mode,&i_st, false);
+    printf("Dir Inode is %lu\n",node_id);
+    children[name] = node_id;
+    add_inode(in,i_st);
+
+    parent_in->i_st.st_ctime = now;
+    parent_in->i_st.st_mtime = now;
+    parent_in->i_st.st_nlink++;
+
+    reply_mkdir(i_st,req);
+    return 0;
   };
+  return 0;
 }
 
-int FileSystem::open(fuse_ino_t ino, int flags, FileHandle** fhp, uid_t uid, gid_t gid, struct fuse_file_info* fi,fuse_req_t req)
+int FileSystem::open(fuse_ino_t ino, int flags, FileHandle** fhp, uid_t uid, gid_t gid, struct fuse_file_info* fi2,fuse_req_t req)
 {
   //fi->direct_io = 1;
-  fi->parallel_direct_writes =1;
+  //FIXME: ISOS ME TA WHEN NA FEVGI TO REFERENCE, NA GINETE DEALLOCATE KAI NA MIN GINETE PANTA SET?
+  struct fuse_file_info fi = *fi2;
+  fi.parallel_direct_writes =1;
+  fi.direct_io = 1;
+
   //printf("Setting direct writes");
   int mode = 0;
   if ((flags & O_ACCMODE) == O_RDONLY)
@@ -1305,76 +1309,73 @@ int FileSystem::open(fuse_ino_t ino, int flags, FileHandle** fhp, uid_t uid, gid
     mode = R_OK | W_OK;
 
   if (!(mode & W_OK) && (flags & O_TRUNC)) {
-    const int ret = -EACCES;
+    const int ret = EACCES;
     fuse_reply_err(req,ret);
     return ret;
   }
 
-  when(regular_inode_table) << [=](auto reg_table){
-    //if( reg_table->find(in) != reg_table->end()){
-    //  auto inode = reg_table->at(in);
-    auto it = reg_table->find(ino);
-    assert(it != reg_table->end());
-    cown_ptr<RegInode> reg_inode = it->second;
-    //FIXME REMOVED REGTABLE
-    when(reg_inode,regular_inode_table) << [=](acquired_cown<RegInode> acquiredCown ,auto ){
-      auto fh = std::make_unique<FileHandle>(reg_inode, flags);
-      int ret = access(acquiredCown->i_st, mode, uid, gid);
+  ino--;
+  auto allocated_cown = reinterpret_cast<ActualCown<RegInode>*>(ino);
+  allocated_cown->acquire_strong_from_weak();
+  cown_ptr<RegInode> reg_inode = cown_ptr<RegInode>(allocated_cown);
 
+  when(reg_inode) << [=](acquired_cown<RegInode> acquiredCown){
+
+    auto fh = std::make_unique<FileHandle>(reg_inode, flags);
+    int ret = access(acquiredCown->i_st, mode, uid, gid);
+
+    if (ret) {
+      reply_fail(ret,req);
+      return ret;
+    }
+
+
+    if (flags & O_TRUNC) {
+      ret = truncate(acquiredCown, 0, uid, gid);
       if (ret) {
         reply_fail(ret,req);
         return ret;
       }
-
-      // TODO Support Open with Truncate flag
-
-      if (flags & O_TRUNC) {
-        ret = truncate(acquiredCown, 0, uid, gid);
-        if (ret) {
-          reply_fail(ret,req);
-          return ret;
-        }
-        auto now = std::time(nullptr);
-        acquiredCown->i_st.st_mtime = now;
-        acquiredCown->i_st.st_ctime = now;
-      }
+      auto now = std::time(nullptr);
+      acquiredCown->i_st.st_mtime = now;
+      acquiredCown->i_st.st_ctime = now;
+    }
 
 
-      //
-      //FileHandle* fhp = fh.release();
-      //reply_create_success(fi,fhp,req,i_st);
-
-      //*fhp = fh.release();
-      FileHandle *k = fh.release();
-      auto addr = reinterpret_cast<uint64_t>(k);
-      [[maybe_unused]]auto x = fi;
-      [[maybe_unused]]auto temp = reinterpret_cast<FileHandle *>(addr);
-      fi->fh = addr;
-      printf("Assigning address in open %lu \n",addr);
-      fuse_reply_open(req, fi);
-      return 0;
-    };
+    //printf("Direct writes var is %d\n",fi.parallel_direct_writes);
+    struct fuse_file_info copy = fi;
+    copy.fh = reinterpret_cast<uint64_t>(fh.release());
+    fuse_reply_open(req, &copy);
+    return 0;
   };
+  return 0;
 }
 
-ssize_t FileSystem::write(FileHandle* fh, const char* buf, size_t size, off_t off, struct fuse_file_info* fi, fuse_req_t req, int *ptr)
+ssize_t FileSystem::write(FileHandle* fh, const char* buf, size_t size, off_t off, struct fuse_file_info* fi, fuse_req_t req, int *ptr,fuse_ino_t ino)
 {
-  //TODO: check if fh->in is null, in this case use the inode tables
-  //printf("write offset %ld\n",off);
-  cown_ptr<RegInode> reg_inode = fh->in;
+
+
+  ino--;
+  auto allocated_cown = reinterpret_cast<ActualCown<RegInode>*>(ino);
+  allocated_cown->acquire_strong_from_weak();
+  cown_ptr<RegInode> reg_inode = cown_ptr<RegInode>(allocated_cown);
+
   when(reg_inode) << [=](acquired_cown<RegInode> reg_in){
     reg_in->write(buf,size,off,req,avail_bytes_,ptr);
   };
-
+  return 0;
 }
 
-ssize_t FileSystem::read(FileHandle* fh, off_t offset, size_t size, fuse_req_t req)
+ssize_t FileSystem::read(FileHandle* fh, off_t offset, size_t size, fuse_req_t req, fuse_ino_t ino)
 {
-  cown_ptr<RegInode> reg_inode = fh->in;
+  ino--;
+  auto allocated_cown = reinterpret_cast<ActualCown<RegInode>*>(ino);
+  allocated_cown->acquire_strong_from_weak();
+  cown_ptr<RegInode> reg_inode = cown_ptr<RegInode>(allocated_cown);
   when(reg_inode) << [=](acquired_cown<RegInode> reg_in){
     reg_in->read(size,offset,req);
   };
-
+  return 0;
 }
 
 void FileSystem::free_space(acquired_cown<Block> & blk)
@@ -1382,6 +1383,7 @@ void FileSystem::free_space(acquired_cown<Block> & blk)
   printf("Deallocating block with id:%d\n",blk->block_number);
   blk->buf.release();
   //avail_bytes_+= BLOCK_SIZE;
+  return ;
 }
 
 
@@ -1390,7 +1392,8 @@ int FileSystem::truncate(acquired_cown<RegInode> &in, off_t newsize, uid_t uid, 
 
   if (in->i_st.st_size == newsize)
     return 0;
-  else if (newsize==0) {
+
+  if (newsize==0) {
     printf("newsize = 0\n");
     for(auto &pair: in->data_blocks){
       cown_ptr<Block> block = pair.second;
@@ -1424,8 +1427,13 @@ int FileSystem::truncate(acquired_cown<RegInode> &in, off_t newsize, uid_t uid, 
     for(int i=0;i<newsize;i+=BLOCK_SIZE){
       int block_id = i/BLOCK_SIZE;
       if(in->data_blocks.find(block_id) == in->data_blocks.end())
+      {
+        printf("Allocating block %d\n",block_id);
         in->allocate_space(block_id,avail_bytes_);
+      }
+      in->i_st.st_size = newsize;
     }
+
     //printf("\n in truncate\n");
     //exit(-99);
   }
@@ -1435,481 +1443,642 @@ int FileSystem::truncate(acquired_cown<RegInode> &in, off_t newsize, uid_t uid, 
 
 int FileSystem::unlink(fuse_ino_t parent_ino, const std::string& name, uid_t uid, gid_t gid,fuse_req_t req)
 {
-  when(dir_inode_table) << [=](auto dir_table ) {
-    cown_ptr<DirInode> parent_in = dir_table->at(parent_ino);
-    when(parent_in,regular_inode_table,dir_inode_table) << [=](acquired_cown<DirInode> acq_parent_in,auto reg_table,auto dir_table) {
+  cown_ptr<DirInode> parent_in = nullptr;
+  if(parent_ino==1)
+    parent_in = root;
+  else
+  {
+    auto it = reinterpret_cast<ActualCown<DirInode> *>(parent_ino);
+    it->acquire_strong_from_weak();
+    parent_in = cown_ptr<DirInode>(it);
+  }
+  when(parent_in) << [=](acquired_cown<DirInode> acq_parent_in) {
 
-      auto entry_to_delete = acq_parent_in->dentries.find(name);
+    auto entry_to_delete = acq_parent_in->dentries.find(name);
 
-      //Entry doesnt exist
-      if (entry_to_delete == acq_parent_in->dentries.end()) {
-        reply_fail(-ENOENT,req);
-        return -ENOENT;
-      };
-
-      // no access rights
-      int ret = access(acq_parent_in->i_st, W_OK, uid, gid);
-      if (ret) {
-        reply_fail(-ret,req);
-        return ret;
-      }
-      // if entry is a directory
-      if(dir_table->find(entry_to_delete->second) != dir_table->end()) {
-        reply_fail(ret,req);
-        return -EPERM;
-      }
-
-      assert( reg_table->find(entry_to_delete->second) != reg_table->end());
-
-      auto now = std::time(nullptr);
-      cown_ptr<RegInode> reg_inode =  reg_table->find(entry_to_delete->second)->second;
-
-      acq_parent_in->dentries.erase(entry_to_delete);
-      when(reg_inode,parent_in) << [&now,req](auto reg_in,auto parent_in){
-        reg_in->i_st.st_ctime = now;
-        reg_in->i_st.st_nlink--;
-
-        parent_in->i_st.st_ctime = now;
-        parent_in->i_st.st_mtime = now;
-        fuse_reply_err(req, 0);
-      };
+    //Entry doesnt exist
+    if (entry_to_delete == acq_parent_in->dentries.end()) {
+      reply_fail(-ENOENT,req);
+      return -ENOENT;
     };
+
+    // no access rights
+    int ret = access(acq_parent_in->i_st, W_OK, uid, gid);
+    if (ret) {
+      reply_fail(-ret,req);
+      return ret;
+    }
+    // if entry is a directory
+    //if(dir_table->find(entry_to_delete->second) != dir_table->end()) {
+    if(entry_to_delete->second % 2 ==0) {
+      reply_fail(ret,req);
+      return -EPERM;
+    }
+
+    //entry is regular file
+    assert( entry_to_delete->second % 2 !=0 );
+
+    auto now = std::time(nullptr);
+
+    auto actual_cown = reinterpret_cast<ActualCown<RegInode> *>(entry_to_delete->second-1);
+    actual_cown->acquire_strong_from_weak();
+    cown_ptr<RegInode> reg_inode = cown_ptr<RegInode>(actual_cown);
+
+    acq_parent_in->dentries.erase(entry_to_delete);
+    when(reg_inode,parent_in) << [=](auto reg_in,auto parent_in){
+      reg_in->i_st.st_ctime = now;
+      reg_in->i_st.st_nlink--;
+
+      parent_in->i_st.st_ctime = now;
+      parent_in->i_st.st_mtime = now;
+      fuse_reply_err(req, 0);
+      return 0;
+    };
+    return 0;
   };
+  return 0;
 }
 
 int FileSystem::rmdir(fuse_ino_t parent_ino, const std::string& name, uid_t uid, gid_t gid, fuse_req_t req)
 {
-  when(dir_inode_table) << [=](auto dir_table){
-    auto it = dir_table->find(parent_ino);
-    cown_ptr<DirInode> parent_in = it->second;
-    when(parent_in,dir_inode_table) << [=](auto acq_parent_in,auto dir_table){
-      DirInode::dir_t& children = acq_parent_in->dentries;
-      auto entry_to_delete = children.find(name);
-      if( entry_to_delete == children.end()){
-        reply_fail(-ENOENT,req);
-        return -ENOENT;
+
+  cown_ptr<DirInode> parent_in = nullptr;
+  if(parent_ino==1)
+    parent_in = root;
+  else
+  {
+    auto it = reinterpret_cast<ActualCown<DirInode> *>(parent_ino);
+    it->acquire_strong_from_weak();
+    parent_in = cown_ptr<DirInode>(it);
+  }
+
+  when(parent_in) << [=](auto acq_parent_in){
+    DirInode::dir_t& children = acq_parent_in->dentries;
+    auto entry_to_delete = children.find(name);
+    if( entry_to_delete == children.end()){
+      reply_fail(-ENOENT,req);
+      return -ENOENT;
+    }
+
+
+    // if not a directory
+    if(entry_to_delete->second!=1 && entry_to_delete->second%2!=0) {
+      reply_fail(-ENOTDIR,req);
+      return -ENOTDIR;
+    }
+
+
+    auto it = reinterpret_cast<ActualCown<DirInode> *>(entry_to_delete->second);
+    it->acquire_strong_from_weak();
+    cown_ptr<DirInode> inode_to_delete = cown_ptr<DirInode>(it);
+
+    when(inode_to_delete,parent_in) << [req,entry_to_delete](auto inode_to_delete,auto parent_in){
+
+      if(inode_to_delete->dentries.size()){
+        reply_fail(-ENOTEMPTY,req);
+        return -ENOTEMPTY;
       }
 
+      inode_to_delete->i_st.st_nlink -= 2;
+      if(inode_to_delete->i_st.st_nlink!=0)
+        printf("aaaa");
+      assert(inode_to_delete->i_st.st_nlink == 0);
 
-      // if not a directory
-      if(dir_table->find(entry_to_delete->second) == dir_table->end()) {
-        reply_fail(-ENOTDIR,req);
-        return -ENOTDIR;
-      }
-
-      assert(dir_table->find(entry_to_delete->second) != dir_table->end());
-      cown_ptr<DirInode> inode_to_delete = dir_table->find(entry_to_delete->second)->second;
-
-      when(inode_to_delete,parent_in) << [req,entry_to_delete](auto inode_to_delete,auto parent_in){
-
-        if(inode_to_delete->dentries.size()){
-          reply_fail(-ENOTEMPTY,req);
-          return -ENOTEMPTY;
-        }
-
-        inode_to_delete->i_st.st_nlink -= 2;
-        assert(inode_to_delete->i_st.st_nlink == 0);
-
-        auto now = std::time(nullptr);
-        parent_in->i_st.st_mtime = now;
-        parent_in->i_st.st_ctime = now;
-        parent_in->dentries.erase(entry_to_delete->first);
-        parent_in->i_st.st_nlink--;
-        fuse_reply_err(req, 0);
-      };
+      auto now = std::time(nullptr);
+      parent_in->i_st.st_mtime = now;
+      parent_in->i_st.st_ctime = now;
+      parent_in->dentries.erase(entry_to_delete->first);
+      parent_in->i_st.st_nlink--;
+      fuse_reply_err(req, 0);
+      return 0;
     };
+    return 0;
+  };
+  return 0;
+}
+
+void FileSystem::my_fallocate(fuse_req_t req, fuse_ino_t ino, int mode, off_t offset, off_t length, fuse_file_info* fi)
+{
+  if (mode) {
+    fuse_reply_err(req, EOPNOTSUPP);
+    return;
+  }
+
+  ino--;
+
+  auto it = reinterpret_cast<ActualCown<RegInode> *>(ino);
+  it->acquire_strong_from_weak();
+  cown_ptr<RegInode> regInode = cown_ptr<RegInode>(it);
+
+  printf("offset %ld and length %ld for ino %lu\n",offset,length,ino);
+  when(regInode) << [=](auto in){
+    for(off_t i=offset;i<offset+length;i+=BLOCK_SIZE){
+      off_t block_id = i/BLOCK_SIZE;
+      if(in->data_blocks.find(block_id) == in->data_blocks.end())
+        in->allocate_space(block_id,avail_bytes_);
+    }
+    in->i_st.st_size = std::max(in->i_st.st_size, offset+length);
+    in->i_st.st_blocks = (__blkcnt_t)in->data_blocks.size();
+    fuse_reply_err(req, 0);
   };
 }
+
+void FileSystem::replace_entry(cown_ptr<DirInode> old_parent_inode,cown_ptr<DirInode> new_parent_inode,uint64_t  uid,acquired_cown<DirInode> &acq_old_parent_in,acquired_cown<DirInode> &acq_new_parent_in,std::string newname,std::map<std::basic_string<char>, uint64_t>::iterator old_entry,fuse_req_t req){
+  //new entry = (old_name,ino)
+  auto dupl_entry =acq_new_parent_in->dentries.find(newname);
+
+
+  //new_name does not exist as an entry to new_parent_entries -- easy, just remove the old entry (oldname,ino) and add new entry (newname,ino)
+  if(dupl_entry == acq_new_parent_in->dentries.end()){
+    //delete <old_name,ino> for old_parent_dir
+    //std::cout << "Erasing entry" << old_entry->first << " " << old_entry->second << " from dir with ino " << acq_old_parent_in->ino << std::endl;
+    acq_old_parent_in->dentries.erase(old_entry->first);
+    //add entry <new_name,ino>
+    acq_new_parent_in->dentries.insert({newname,old_entry->second});
+    //reply to kernel
+
+    if(old_entry->second%2==0)
+    {
+      acq_old_parent_in->i_st.st_nlink--;
+      acq_new_parent_in->i_st.st_nlink++;
+    }
+
+    fuse_reply_err(req, 0);
+
+  }
+  // new_name already exists as an entry to new_parent_entries ==> decrement nlinks of this inode
+  else{
+
+    when(regular_inode_table,dir_inode_table) << [uid,old_entry,dupl_entry,old_parent_inode,new_parent_inode,req](auto reg_table,auto dir_table){
+      cown_ptr<RegInode> old_reg_ino_cown = reg_table->find(old_entry->second) == reg_table->end() ? make_cown<RegInode>() : reg_table->find(old_entry->second)->second;
+      cown_ptr<RegInode> dupl_reg_ino_cown = reg_table->find(dupl_entry->second) == reg_table->end() ? make_cown<RegInode>() : reg_table->find(dupl_entry->second)->second;
+
+      cown_ptr<DirInode> old_dir_ino_cown = dir_table->find(old_entry->second) == dir_table->end() ? make_cown<DirInode>() : dir_table->find(old_entry->second)->second;
+      cown_ptr<DirInode> dupl_dir_ino_cown = dir_table->find(dupl_entry->second) == dir_table->end() ? make_cown<DirInode>() : dir_table->find(dupl_entry->second)->second;
+
+
+      when(old_parent_inode,
+           new_parent_inode,
+           old_reg_ino_cown,
+           dupl_reg_ino_cown,
+           old_dir_ino_cown,
+           dupl_dir_ino_cown) << [=]
+        (acquired_cown<DirInode> acq_old_parent_in,
+         acquired_cown<DirInode>  acq_new_parent_in,
+         acquired_cown<RegInode> old_reg_in,
+         acquired_cown<RegInode> dupl_reg_in,
+         acquired_cown<DirInode> old_dir_in,
+         acquired_cown<DirInode> dupl_dir_in){
+
+          if (
+            !dupl_reg_in->fake && acq_new_parent_in->i_st.st_mode & S_ISVTX && uid
+            && uid != dupl_reg_in->i_st.st_uid && uid != acq_new_parent_in->i_st.st_uid) {
+            reply_fail(-EPERM,req);
+            return -EPERM;
+          }
+
+          if (
+            !dupl_dir_in->fake && acq_new_parent_in->i_st.st_mode & S_ISVTX && uid
+            && uid != dupl_reg_in->i_st.st_uid && uid != acq_new_parent_in->i_st.st_uid) {
+            reply_fail(-EPERM,req);
+            return -EPERM;
+          }
+
+
+          if( !old_dir_in->fake && (old_dir_in->i_st.st_mode & S_IFDIR)){
+            if( !dupl_dir_in->fake && (dupl_dir_in->i_st.st_mode & S_IFDIR)  ){
+              if(!dupl_dir_in->dentries.empty()){
+                reply_fail(-ENOTEMPTY,req);
+                return -ENOTEMPTY;
+              }
+            }
+            else{
+              reply_fail(-ENOTDIR,req);
+              return -ENOTDIR;
+            }
+          }else {
+            if (!dupl_dir_in->fake && dupl_dir_in->i_st.st_mode & S_IFDIR) return -EISDIR;
+          }
+          acq_old_parent_in->i_st.st_ctime = std::time(nullptr);
+
+          acq_old_parent_in->dentries.erase(old_entry->first);
+          acq_new_parent_in->dentries.erase(dupl_entry->first);
+          acq_new_parent_in->dentries.insert({old_entry->first,old_entry->second});
+
+          if(!old_dir_in->fake && !dupl_dir_in->fake){
+            acq_old_parent_in->i_st.st_nlink--;
+            acq_new_parent_in->i_st.st_nlink++;
+          }
+          if(!dupl_reg_in->fake)
+            dupl_reg_in->i_st.st_nlink--;
+
+          fuse_reply_err(req,0);
+          return 0;
+        };
+    };
+  }
+}
+
+
+
+void FileSystem::replace_entry_same_parent(uint64_t  uid,cown_ptr<DirInode> old_parent_inode,acquired_cown<DirInode> &acq_old_parent_in,std::string newname, std::map<std::basic_string<char>, uint64_t>::iterator old_entry,fuse_req_t req ){
+  //new entry = (old_name,ino)
+  auto dupl_entry =acq_old_parent_in->dentries.find(newname);
+
+
+  //new_name does not exist as an entry to new_parent_entries -- easy, just remove the old entry (oldname,ino) and add new entry (newname,ino)
+  if(dupl_entry == acq_old_parent_in->dentries.end()){
+    //delete <old_name,ino> for old_parent_dir
+    //std::cout << "Erasing entry" << old_entry->first << " " << old_entry->second << " from dir with ino " << acq_old_parent_in->ino << std::endl;
+    acq_old_parent_in->dentries.erase(old_entry->first);
+    //add entry <new_name,ino>
+    acq_old_parent_in->dentries.insert({newname,old_entry->second});
+
+    //reply to kernel
+    fuse_reply_err(req, 0);
+  }
+  // new_name already exists as an entry to new_parent_entries ==> decrement nlinks of this inode
+  else{
+
+    when(regular_inode_table,dir_inode_table) << [uid,old_entry,dupl_entry,old_parent_inode,req](auto reg_table,auto dir_table){
+      cown_ptr<RegInode> old_reg_ino_cown = reg_table->find(old_entry->second) == reg_table->end() ? make_cown<RegInode>() : reg_table->find(old_entry->second)->second;
+      cown_ptr<RegInode> dupl_reg_ino_cown = reg_table->find(dupl_entry->second) == reg_table->end() ? make_cown<RegInode>() : reg_table->find(dupl_entry->second)->second;
+
+      cown_ptr<DirInode> old_dir_ino_cown = dir_table->find(old_entry->second) == dir_table->end() ? make_cown<DirInode>() : dir_table->find(old_entry->second)->second;
+      cown_ptr<DirInode> dupl_dir_ino_cown = dir_table->find(dupl_entry->second) == dir_table->end() ? make_cown<DirInode>() : dir_table->find(dupl_entry->second)->second;
+
+
+      when(old_parent_inode,
+           old_reg_ino_cown,
+           dupl_reg_ino_cown,
+           old_dir_ino_cown,
+           dupl_dir_ino_cown) << [=]
+        (acquired_cown<DirInode> acq_old_parent_in,
+         acquired_cown<RegInode> old_reg_in,
+         acquired_cown<RegInode> dupl_reg_in,
+         acquired_cown<DirInode> old_dir_in,
+         acquired_cown<DirInode> dupl_dir_in){
+
+          if (
+            !dupl_reg_in->fake && acq_old_parent_in->i_st.st_mode & S_ISVTX && uid
+            && uid != dupl_reg_in->i_st.st_uid && uid != acq_old_parent_in->i_st.st_uid) {
+            reply_fail(-EPERM,req);
+            return -EPERM;
+          }
+
+          if (
+            !dupl_dir_in->fake && acq_old_parent_in->i_st.st_mode & S_ISVTX && uid
+            && uid != dupl_reg_in->i_st.st_uid && uid != acq_old_parent_in->i_st.st_uid) {
+            reply_fail(-EPERM,req);
+            return -EPERM;
+          }
+
+
+          if( !old_dir_in->fake && (old_dir_in->i_st.st_mode & S_IFDIR)){
+            if( !dupl_dir_in->fake && (dupl_dir_in->i_st.st_mode & S_IFDIR)  ){
+              if(!dupl_dir_in->dentries.empty()){
+                reply_fail(-ENOTEMPTY,req);
+                return -ENOTEMPTY;
+              }
+            }
+            else{
+              reply_fail(-ENOTDIR,req);
+              return -ENOTDIR;
+            }
+          }else {
+            if (!dupl_dir_in->fake && dupl_dir_in->i_st.st_mode & S_IFDIR) return -EISDIR;
+          }
+          acq_old_parent_in->i_st.st_ctime = std::time(nullptr);
+
+          acq_old_parent_in->dentries.erase(old_entry->first);
+          acq_old_parent_in->dentries.erase(dupl_entry->first);
+          acq_old_parent_in->dentries.insert({dupl_entry->first,old_entry->second});
+
+          if(!old_dir_in->fake && !dupl_dir_in->fake){
+            acq_old_parent_in->i_st.st_nlink--;
+            //acq_old_parent_in->i_st.st_nlink++;
+          }
+          if(!dupl_reg_in->fake)
+            dupl_reg_in->i_st.st_nlink--;
+
+          fuse_reply_err(req,0);
+          return 0;
+        };
+
+
+    };
+  }
+}
+
+
 
 int FileSystem::rename(fuse_ino_t parent_ino, const std::string& oldname, fuse_ino_t newparent_ino, const std::string& newname, uid_t uid, gid_t gid, fuse_req_t req)
 {
   if (oldname.length() > NAME_MAX || newname.length() > NAME_MAX)
     return -ENAMETOOLONG;
 
-  when(dir_inode_table) << [=](auto dir_table){
+  if(parent_ino != newparent_ino){
 
-
-
-    if(parent_ino != newparent_ino){
-      auto old_parent_inode = dir_table->find(parent_ino)->second;
-      auto new_parent_inode = dir_table->find(newparent_ino)->second;
-
-
-
-      when(old_parent_inode, new_parent_inode) << [=](acquired_cown<DirInode> acq_old_parent_in,acquired_cown<DirInode>  acq_new_parent_in){
-
-
-
-
-        //old entry = (old_name,ino)
-        auto old_entry = acq_old_parent_in->dentries.find(oldname);
-        // check if old entry does not exist
-        if (old_entry == acq_old_parent_in->dentries.end()) {
-          reply_fail(-ENOENT,req);
-          return -ENOENT;
-        }
-
-        int ret = access(acq_old_parent_in->i_st, W_OK, uid, gid);
-        if (ret) {
-          fuse_reply_err(req,-ret);
-          return ret;
-        }
-
-        ret = access(acq_new_parent_in->i_st, W_OK, uid, gid);
-        if (ret) {
-          fuse_reply_err(req,-ret);
-          return ret;
-        }
-
-        Inode * old_in = reinterpret_cast<Inode *>(old_entry->second);
-        if (old_in->i_st.st_mode & S_IFDIR) {
-          ret = access(old_in->i_st, W_OK, uid, gid);
-          if (ret) return ret;
-        }
-
-        if (acq_old_parent_in->i_st.st_mode & S_ISVTX) {
-          if (uid && uid != old_in->i_st.st_uid && uid != acq_old_parent_in->i_st.st_uid)
-            return -EPERM;
-        }
-
-        //new entry = (old_name,ino)
-        auto dupl_entry =acq_new_parent_in->dentries.find(newname);
-
-
-        //new_name does not exist as an entry to new_parent_entries -- easy, just remove the old entry (oldname,ino) and add new entry (newname,ino)
-        if(dupl_entry == acq_new_parent_in->dentries.end()){
-          //delete <old_name,ino> for old_parent_dir
-          std::cout << "Erasing entry" << old_entry->first << " " << old_entry->second << " from dir with ino " << acq_old_parent_in->ino << std::endl;
-          acq_old_parent_in->dentries.erase(old_entry->first);
-          //add entry <new_name,ino>
-          acq_new_parent_in->dentries.insert({newname,old_entry->second});
-          //reply to kernel
-
-          if(old_in->is_directory())
-          {
-            acq_old_parent_in->i_st.st_nlink--;
-            acq_new_parent_in->i_st.st_nlink++;
-          }
-
-          fuse_reply_err(req, 0);
-        }
-        // new_name already exists as an entry to new_parent_entries ==> decrement nlinks of this inode
-        else{
-
-          when(regular_inode_table,dir_inode_table) << [uid,old_entry,dupl_entry,old_parent_inode,new_parent_inode,req](auto reg_table,auto dir_table){
-            cown_ptr<RegInode> old_reg_ino_cown = reg_table->find(old_entry->second) == reg_table->end() ? make_cown<RegInode>() : reg_table->find(old_entry->second)->second;
-            cown_ptr<RegInode> dupl_reg_ino_cown = reg_table->find(dupl_entry->second) == reg_table->end() ? make_cown<RegInode>() : reg_table->find(dupl_entry->second)->second;
-
-            cown_ptr<DirInode> old_dir_ino_cown = dir_table->find(old_entry->second) == dir_table->end() ? make_cown<DirInode>() : dir_table->find(old_entry->second)->second;
-            cown_ptr<DirInode> dupl_dir_ino_cown = dir_table->find(dupl_entry->second) == dir_table->end() ? make_cown<DirInode>() : dir_table->find(dupl_entry->second)->second;
-
-
-            when(old_parent_inode,
-                 new_parent_inode,
-                 old_reg_ino_cown,
-                 dupl_reg_ino_cown,
-                 old_dir_ino_cown,
-                 dupl_dir_ino_cown) << [=]
-              (acquired_cown<DirInode> acq_old_parent_in,
-               acquired_cown<DirInode>  acq_new_parent_in,
-               acquired_cown<RegInode> old_reg_in,
-               acquired_cown<RegInode> dupl_reg_in,
-               acquired_cown<DirInode> old_dir_in,
-               acquired_cown<DirInode> dupl_dir_in){
-
-                if (
-                  !dupl_reg_in->fake && acq_new_parent_in->i_st.st_mode & S_ISVTX && uid
-                  && uid != dupl_reg_in->i_st.st_uid && uid != acq_new_parent_in->i_st.st_uid) {
-                  reply_fail(-EPERM,req);
-                  return -EPERM;
-                }
-
-                if (
-                  !dupl_dir_in->fake && acq_new_parent_in->i_st.st_mode & S_ISVTX && uid
-                  && uid != dupl_reg_in->i_st.st_uid && uid != acq_new_parent_in->i_st.st_uid) {
-                  reply_fail(-EPERM,req);
-                  return -EPERM;
-                }
-
-
-                if( !old_dir_in->fake && (old_dir_in->i_st.st_mode & S_IFDIR)){
-                  if( !dupl_dir_in->fake && (dupl_dir_in->i_st.st_mode & S_IFDIR)  ){
-                    if(!dupl_dir_in->dentries.empty()){
-                      reply_fail(-ENOTEMPTY,req);
-                      return -ENOTEMPTY;
-                    }
-                  }
-                  else{
-                    reply_fail(-ENOTDIR,req);
-                    return -ENOTDIR;
-                  }
-                }else {
-                  if (!dupl_dir_in->fake && dupl_dir_in->i_st.st_mode & S_IFDIR) return -EISDIR;
-                }
-                acq_old_parent_in->i_st.st_ctime = std::time(nullptr);
-
-                acq_old_parent_in->dentries.erase(old_entry->first);
-                acq_new_parent_in->dentries.erase(dupl_entry->first);
-                acq_new_parent_in->dentries.insert({old_entry->first,old_entry->second});
-
-                if(!old_dir_in->fake && !dupl_dir_in->fake){
-                  acq_old_parent_in->i_st.st_nlink--;
-                  acq_new_parent_in->i_st.st_nlink++;
-                }
-                if(!dupl_reg_in->fake)
-                  dupl_reg_in->i_st.st_nlink--;
-
-                fuse_reply_err(req,0);
-              };
-
-
-          };
-
-
-
-
-
-
-
-        }
-
-
-      };
-
+    cown_ptr<DirInode> old_parent_inode = nullptr;
+    if(parent_ino == 1)
+      old_parent_inode = root;
+    else{
+      auto it = reinterpret_cast<ActualCown<DirInode> *>(parent_ino);
+      it->acquire_strong_from_weak();
+      old_parent_inode  = cown_ptr<DirInode>(it);
     }
 
+
+    cown_ptr<DirInode> new_parent_inode = nullptr;
+    if(newparent_ino == 1)
+      new_parent_inode = root;
     else{
-      printf("\n--------in else-------\n");
+      auto it = reinterpret_cast<ActualCown<DirInode> *>(newparent_ino);
+      it->acquire_strong_from_weak();
+      new_parent_inode  = cown_ptr<DirInode>(it);
+    }
 
 
-      auto old_parent_inode = dir_table->find(parent_ino)->second;
+    when(old_parent_inode, new_parent_inode) << [=](acquired_cown<DirInode> acq_old_parent_in,acquired_cown<DirInode>  acq_new_parent_in){
 
+      //old entry = (old_name,ino)
+      auto old_entry = acq_old_parent_in->dentries.find(oldname);
+      // check if old entry does not exist
+      if (old_entry == acq_old_parent_in->dentries.end()) {
+        reply_fail(-ENOENT,req);
+        return -ENOENT;
+      }
 
+      int ret = access(acq_old_parent_in->i_st, W_OK, uid, gid);
+      if (ret) {
+        fuse_reply_err(req,-ret);
+        return ret;
+      }
 
+      ret = access(acq_new_parent_in->i_st, W_OK, uid, gid);
+      if (ret) {
+        fuse_reply_err(req,-ret);
+        return ret;
+      }
 
-      when(old_parent_inode) << [=](acquired_cown<DirInode> acq_old_parent_in){
+      //Inode * old_in = reinterpret_cast<Inode *>(old_entry->second);
 
+      if(old_entry->second==1 || old_entry->second%2==0){
 
-
-
-        //old entry = (old_name,ino)
-        auto old_entry = acq_old_parent_in->dentries.find(oldname);
-        // check if old entry does not exist
-        if (old_entry == acq_old_parent_in->dentries.end()) {
-          reply_fail(-ENOENT,req);
-          return -ENOENT;
-        }
-
-        int ret = access(acq_old_parent_in->i_st, W_OK, uid, gid);
-        if (ret) {
-          fuse_reply_err(req,-ret);
-          return ret;
-        }
-
-        ret = access(acq_old_parent_in->i_st, W_OK, uid, gid);
-        if (ret) {
-          fuse_reply_err(req,-ret);
-          return ret;
-        }
-
-        Inode * old_in = reinterpret_cast<Inode *>(old_entry->second);
-        if (old_in->i_st.st_mode & S_IFDIR) {
-          ret = access(old_in->i_st, W_OK, uid, gid);
-          if (ret) {
-            reply_fail(ret,req);
-            return ret;
-          }
-        }
-
-        if (acq_old_parent_in->i_st.st_mode & S_ISVTX) {
-          if (uid && uid != old_in->i_st.st_uid && uid != acq_old_parent_in->i_st.st_uid)
-            return -EPERM;
-        }
-
-
-
-
-
-        //new entry = (old_name,ino)
-        auto dupl_entry =acq_old_parent_in->dentries.find(newname);
-
-
-        //new_name does not exist as an entry to new_parent_entries -- easy, just remove the old entry (oldname,ino) and add new entry (newname,ino)
-        if(dupl_entry == acq_old_parent_in->dentries.end()){
-          //delete <old_name,ino> for old_parent_dir
-          std::cout << "Erasing entry" << old_entry->first << " " << old_entry->second << " from dir with ino " << acq_old_parent_in->ino << std::endl;
-          acq_old_parent_in->dentries.erase(old_entry->first);
-          //add entry <new_name,ino>
-          acq_old_parent_in->dentries.insert({newname,old_entry->second});
-
-          //reply to kernel
-          fuse_reply_err(req, 0);
-        }
-        // new_name already exists as an entry to new_parent_entries ==> decrement nlinks of this inode
+        cown_ptr<DirInode> dirInode = nullptr;
+        if(old_entry->second==1)
+          dirInode = root;
         else{
-
-          when(regular_inode_table,dir_inode_table) << [uid,old_entry,dupl_entry,old_parent_inode,req](auto reg_table,auto dir_table){
-            cown_ptr<RegInode> old_reg_ino_cown = reg_table->find(old_entry->second) == reg_table->end() ? make_cown<RegInode>() : reg_table->find(old_entry->second)->second;
-            cown_ptr<RegInode> dupl_reg_ino_cown = reg_table->find(dupl_entry->second) == reg_table->end() ? make_cown<RegInode>() : reg_table->find(dupl_entry->second)->second;
-
-            cown_ptr<DirInode> old_dir_ino_cown = dir_table->find(old_entry->second) == dir_table->end() ? make_cown<DirInode>() : dir_table->find(old_entry->second)->second;
-            cown_ptr<DirInode> dupl_dir_ino_cown = dir_table->find(dupl_entry->second) == dir_table->end() ? make_cown<DirInode>() : dir_table->find(dupl_entry->second)->second;
-
-
-            when(old_parent_inode,
-                 old_reg_ino_cown,
-                 dupl_reg_ino_cown,
-                 old_dir_ino_cown,
-                 dupl_dir_ino_cown) << [=]
-              (acquired_cown<DirInode> acq_old_parent_in,
-               acquired_cown<RegInode> old_reg_in,
-               acquired_cown<RegInode> dupl_reg_in,
-               acquired_cown<DirInode> old_dir_in,
-               acquired_cown<DirInode> dupl_dir_in){
-
-                if (
-                  !dupl_reg_in->fake && acq_old_parent_in->i_st.st_mode & S_ISVTX && uid
-                  && uid != dupl_reg_in->i_st.st_uid && uid != acq_old_parent_in->i_st.st_uid) {
-                  reply_fail(-EPERM,req);
-                  return -EPERM;
-                }
-
-                if (
-                  !dupl_dir_in->fake && acq_old_parent_in->i_st.st_mode & S_ISVTX && uid
-                  && uid != dupl_reg_in->i_st.st_uid && uid != acq_old_parent_in->i_st.st_uid) {
-                  reply_fail(-EPERM,req);
-                  return -EPERM;
-                }
-
-
-                if( !old_dir_in->fake && (old_dir_in->i_st.st_mode & S_IFDIR)){
-                  if( !dupl_dir_in->fake && (dupl_dir_in->i_st.st_mode & S_IFDIR)  ){
-                    if(!dupl_dir_in->dentries.empty()){
-                      reply_fail(-ENOTEMPTY,req);
-                      return -ENOTEMPTY;
-                    }
-                  }
-                  else{
-                    reply_fail(-ENOTDIR,req);
-                    return -ENOTDIR;
-                  }
-                }else {
-                  if (!dupl_dir_in->fake && dupl_dir_in->i_st.st_mode & S_IFDIR) return -EISDIR;
-                }
-                acq_old_parent_in->i_st.st_ctime = std::time(nullptr);
-
-                acq_old_parent_in->dentries.erase(old_entry->first);
-                acq_old_parent_in->dentries.erase(dupl_entry->first);
-                acq_old_parent_in->dentries.insert({old_entry->first,old_entry->second});
-
-                if(!old_dir_in->fake && !dupl_dir_in->fake){
-                  acq_old_parent_in->i_st.st_nlink--;
-                  acq_old_parent_in->i_st.st_nlink++;
-                }
-                if(!dupl_reg_in->fake)
-                  dupl_reg_in->i_st.st_nlink--;
-
-                fuse_reply_err(req,0);
-              };
-
-
-          };
-
-
-
-
-
-
-
+          auto it = reinterpret_cast<ActualCown<DirInode> *>(old_entry->second);
+          it->acquire_strong_from_weak();
+          dirInode = cown_ptr<DirInode>(it);
         }
 
+        when(dirInode,old_parent_inode,new_parent_inode) << [old_parent_inode,new_parent_inode,newname,old_entry,req,this,uid,gid](auto old_in,auto acq_old_parent_in,auto acq_new_parent_in){
+          if (old_in->i_st.st_mode & S_IFDIR) {
+            auto ret = access(old_in->i_st, W_OK, uid, gid);
+            if (ret) return ret;
+          }
 
-      };
+          if (acq_old_parent_in->i_st.st_mode & S_ISVTX) {
+            if (uid && uid != old_in->i_st.st_uid && uid != acq_old_parent_in->i_st.st_uid)
+              return -EPERM;
+          }
 
+          replace_entry(old_parent_inode,new_parent_inode,uid,acq_old_parent_in,acq_new_parent_in,newname,old_entry,req);
+          return 0;
+        };
+      }else{
+
+
+        auto it = reinterpret_cast<ActualCown<RegInode> *>(old_entry->second-1);
+        it->acquire_strong_from_weak();
+        auto regInode = cown_ptr<RegInode>(it);
+
+
+        when(regInode,old_parent_inode,new_parent_inode) << [old_parent_inode,new_parent_inode,newname,old_entry,req,this,uid,gid](acquired_cown<RegInode> old_in,auto acq_old_parent_in,auto acq_new_parent_in){
+          if (old_in->i_st.st_mode & S_IFDIR) {
+            auto ret = access(old_in->i_st, W_OK, uid, gid);
+            if (ret) return ret;
+          }
+
+          if (acq_old_parent_in->i_st.st_mode & S_ISVTX) {
+            if (uid && uid != old_in->i_st.st_uid && uid != acq_old_parent_in->i_st.st_uid)
+              return -EPERM;
+          }
+
+          replace_entry(old_parent_inode,new_parent_inode,uid,acq_old_parent_in,acq_new_parent_in,newname,old_entry,req);
+          return 0;
+        };
+      }
+      return 0;
     };
+  }
+  else{
+
+
+    cown_ptr<DirInode> old_parent_inode= nullptr;
+    if(parent_ino==1)
+      old_parent_inode=root;
+    else{
+      auto it = reinterpret_cast<ActualCown<DirInode> *>(parent_ino);
+      it->acquire_strong_from_weak();
+      old_parent_inode  = cown_ptr<DirInode>(it);
+    }
+
+    when(old_parent_inode) << [=](acquired_cown<DirInode> acq_old_parent_in){
+
+
+      //old entry = (old_name,ino)
+      auto old_entry = acq_old_parent_in->dentries.find(oldname);
+      // check if old entry does not exist
+      if (old_entry == acq_old_parent_in->dentries.end()) {
+        reply_fail(-ENOENT,req);
+        return -ENOENT;
+      }
+
+      int ret = access(acq_old_parent_in->i_st, W_OK, uid, gid);
+      if (ret) {
+        fuse_reply_err(req,-ret);
+        return ret;
+      }
+
+      ret = access(acq_old_parent_in->i_st, W_OK, uid, gid);
+      if (ret) {
+        fuse_reply_err(req,-ret);
+        return ret;
+      }
+
+
+
+
+      if(old_entry->second == 1 || old_entry->second%2==0){
+
+        cown_ptr<DirInode> old_entry_inode = nullptr;
+        if(old_entry->second==1)
+          old_entry_inode = root;
+        else{
+          auto it = reinterpret_cast<ActualCown<DirInode> *>(old_entry->second);
+          it->acquire_strong_from_weak();
+          old_entry_inode = cown_ptr<DirInode>(it);
+        }
+
+        //------
+
+        when(old_entry_inode,old_parent_inode) <<[this,req,uid,gid,old_parent_inode,newname,old_entry](auto old_in,auto acq_old_parent_in){
+          if (old_in->i_st.st_mode & S_IFDIR) {
+            auto ret = access(old_in->i_st, W_OK, uid, gid);
+            if (ret) {
+              reply_fail(ret,req);
+              return ret;
+            }
+          }
+
+          if (old_in->i_st.st_mode & S_ISVTX) {
+            if (uid && uid != old_in->i_st.st_uid && uid != old_in->i_st.st_uid)
+              return -EPERM;
+          }
+
+          replace_entry_same_parent(uid,old_parent_inode,acq_old_parent_in,newname,old_entry,req);
+          return 0;
+        };
+      }else{
+
+
+        auto it = reinterpret_cast<ActualCown<RegInode> *>(old_entry->second-1);
+        it->acquire_strong_from_weak();
+        auto regInode = cown_ptr<RegInode>(it);
+
+        when(regInode,old_parent_inode) << [this,uid,gid,old_parent_inode,newname,old_entry,req](auto old_in,auto acq_old_parent_in){
+          if (old_in->i_st.st_mode & S_IFDIR) {
+            auto ret = access(old_in->i_st, W_OK, uid, gid);
+            if (ret) return ret;
+          }
+
+          if (acq_old_parent_in->i_st.st_mode & S_ISVTX) {
+            if (uid && uid != old_in->i_st.st_uid && uid != acq_old_parent_in->i_st.st_uid)
+              return -EPERM;
+          }
+          replace_entry_same_parent(uid,old_parent_inode,acq_old_parent_in,newname,old_entry,req);
+          return 0;
+        };
+
+
+
+
+
+      }
+      return 0;
+    };
+
   };
+  return 0;
 }
-
-
-
 
 void FileSystem::forget(fuse_ino_t ino, unsigned long nlookup,fuse_req_t req)
 {
-  when(dir_inode_table,regular_inode_table) << [=](auto dir_table,auto reg_table){
-    auto it = dir_table->find(ino);
-    if(it != dir_table->end()){
-      cown_ptr<DirInode> dirInode = it->second;
-      when(dirInode,dir_inode_table) << [ino,nlookup](acquired_cown<DirInode> dir_ino,auto dir_table){
-        assert(dir_ino->krefs>0);
-        dir_ino->krefs -= nlookup;
-        assert(dir_ino->krefs>=0);
-        if(dir_ino->krefs == 0  && dir_ino->i_st.st_nlink == 0){
-          printf("Erasing dir-ino:%lu with nlookup: %lud and nlinks: %lu",dir_ino->i_st.st_ino,dir_ino->krefs,dir_ino->i_st.st_nlink);
-          dir_table->erase(ino);
-        }
-        //printf("krefs %d\n",dir_ino->krefs);
-      };
-    }
-    else{
-      auto it = reg_table->find(ino);
-      if(it != reg_table->end()){
-        cown_ptr<RegInode> regInode = it->second;
-        when(regInode,regular_inode_table) << [nlookup,ino, this](acquired_cown<RegInode> reg_ino,auto reg_table){
-          assert(reg_ino->krefs>0);
-          reg_ino->krefs -= nlookup;
-          assert(reg_ino->krefs>=0);
-          if(reg_ino->krefs == 0 && reg_ino->i_st.st_nlink == 0){
-            //printf("Erasing reg-ino:%lu with nlookup: %lud and nlinks: %lu",reg_ino->i_st.st_ino,reg_ino->krefs,reg_ino->i_st.st_nlink);
-            reg_table->erase(ino);
-            for(auto &pair: reg_ino->data_blocks){
-              cown_ptr<Block> block = pair.second;
-              when(block) << [=](acquired_cown<Block> blk){
-                free_space(blk);
-              };
-            }
-          }
-          //printf("krefs %d\n",reg_ino->krefs);
-        };
-      }
+
+  // if inode number indicates a directory inode
+  if( ino==1 || ino%2==0){
+
+    cown_ptr<DirInode> dirInode = nullptr;
+    if(ino==1)
+      dirInode = root;
+    else
+    {
+      auto it = reinterpret_cast<ActualCown<DirInode> *>(ino);
+      it->acquire_strong_from_weak();
+      dirInode = cown_ptr<DirInode>(it);
     }
 
-  };
+    when(dirInode,dir_inode_table) << [ino,nlookup](acquired_cown<DirInode> dir_ino,auto dir_table){
+      assert(dir_ino->krefs>0);
+      dir_ino->krefs -= nlookup;
+      assert(dir_ino->krefs>=0);
+      if(dir_ino->krefs == 0  && dir_ino->i_st.st_nlink == 0){
+        //printf("Erasing dir-ino:%lu with nlookup: %lud and nlinks: %lu",dir_ino->i_st.st_ino,dir_ino->krefs,dir_ino->i_st.st_nlink);
+        dir_table->erase(ino);
+      }
+    };
+  }else{
+    auto it = reinterpret_cast<ActualCown<RegInode> *>(ino-1);
+    it->acquire_strong_from_weak();
+    cown_ptr<RegInode> regInode = cown_ptr<RegInode>(it);
+    when(regInode,regular_inode_table) << [=](acquired_cown<RegInode> reg_ino,auto reg_table){
+      assert(reg_ino->krefs>0);
+      reg_ino->krefs -= nlookup;
+      assert(reg_ino->krefs>=0);
+      if(reg_ino->krefs == 0 && reg_ino->i_st.st_nlink == 0){
+        //printf("Erasing reg-ino:%lu with nlookup: %lud and nlinks: %lu",reg_ino->i_st.st_ino,reg_ino->krefs,reg_ino->i_st.st_nlink);
+        reg_table->erase(ino);
+        for(auto &pair: reg_ino->data_blocks){
+          cown_ptr<Block> block = pair.second;
+          when(block) << [=](acquired_cown<Block> blk){
+            free_space(blk);
+          };
+        }
+      }
+    };
+  }
 }
 
-//FIXME: FIX BLOCK SIZE
+
+void my_test(int argc,char *argv[],SystematicTestHarness *harness){
+  when()<<[=](){
+
+    Scheduler::add_external_event_source();
+    harness->external_thread([=]() {
+
+      setbuf(stdout,0);
+      int returnValue = system("fusermount -u /home/csdeptucy/ssfs");
+
+      if (returnValue == -1) {
+        // Error executing the command
+        perror("system");
+        exit(EXIT_FAILURE);
+      }
+
+      struct filesystem_opts opts;
+      // option defaults
+
+      opts.size = 512 << 20;
+      opts.debug = false;
+      struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
+      if (fuse_opt_parse(&args, &opts, fs_fuse_opts, fs_opt_proc) == -1) {
+        exit(1);
+      }
+
+      assert(opts.size > 0);
+
+
+
+      const char* mountpoint = "/home/csdeptucy/ssfs";
+
+
+
+      FileSystem fs(opts.size);
+
+      auto se = fuse_session_new(&args,&fs.ops(), sizeof(fs.ops()),&fs);
+      fuse_set_signal_handlers(se);
+      fuse_session_mount(se,mountpoint);
+      fuse_daemonize(true);
+      my_fuse_session_loop(se);
+      fuse_session_unmount(se);
+      fuse_remove_signal_handlers(se);
+      fuse_session_destroy(se);
+
+    });
+  };
+
+
+}
+
+
+
+
 
 int main(int argc, char *argv[])
 {
-  setbuf(stdout,0);
-  system("fusermount -u /home/csdeptucy/ssfs");
-  SystematicTestHarness harness(argc, argv);
-  struct filesystem_opts opts;
-  // option defaults
-
-  opts.size = 512 << 20;
-  opts.debug = false;
-  struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
-  if (fuse_opt_parse(&args, &opts, fs_fuse_opts, fs_opt_proc) == -1) {
-    exit(1);
-  }
-
-  assert(opts.size > 0);
-
-  struct fuse_chan* ch;
-  int err = -1;
-  const char* mountpoint = "/home/csdeptucy/ssfs";
-
-
-
-  FileSystem fs(opts.size);
-  const fuse_lowlevel_ops& ops =  fs.ops();
-  auto se = fuse_session_new(&args,&fs.ops(), sizeof(fs.ops()),&fs);
-  fuse_set_signal_handlers(se);
-  fuse_session_mount(se,mountpoint);
-  fuse_daemonize(true);
-  harness.run(my_session_loop,&harness,se);
-  //fuse_session_loop(se);
-  fuse_session_unmount(se);
-  fuse_remove_signal_handlers(se);
-  fuse_session_destroy(se);
+  SystematicTestHarness harness(argc,argv);
+  harness.run(my_test,argc,argv,&harness);
 }

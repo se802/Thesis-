@@ -1,11 +1,12 @@
 #pragma once
-#define FUSE_USE_VERSION 34
+#define FUSE_USE_VERSION 35
 
-
-#include "debug/harness.h"
 #include "cpp/when.h"
+#include "debug/harness.h"
+
 #include <atomic>
 #include <cassert>
+#include <csignal>
 #include <cstring>
 #include <fuse3/fuse_lowlevel.h>
 #include <linux/limits.h>
@@ -67,6 +68,8 @@ static void usage(const char* progname) {
     "    -debug             turn on verbose logging\n");
 }
 
+
+
 static int
 fs_opt_proc(void* data, const char* arg, int key, struct fuse_args* outargs) {
   switch (key) {
@@ -82,94 +85,45 @@ fs_opt_proc(void* data, const char* arg, int key, struct fuse_args* outargs) {
       exit(1);
   }
 }
-
-struct my_thread_data {
-  struct fuse_session *se;
-  struct fuse_buf *fbuf;
-};
+bool done = false;
 
 
 
 
 
+void my_fuse_session_loop(struct fuse_session *se) {
+  // Registering the signal handler
 
 
+  printf("in session loop\n");
+  int res = 0;
+  while (!fuse_session_exited(se) ) {
+    struct fuse_buf fbuf{.mem= NULL};
+    //printf("Before receive_buf %lu \n",pthread_self());
+    res = fuse_session_receive_buf(se, &fbuf);
 
 
-struct ExternalSource;
-
-
-
-
-struct Poller : VCown<Poller>
-{
-  std::shared_ptr<ExternalSource> es;
-};
-
-struct ExternalSource
-{
-  Poller* p;
-  std::atomic<bool> notifications_on;
-  Notification* n;
-
-  ExternalSource(Poller* p_) : p(p_), notifications_on(false)
-  {
-    Cown::acquire(p);
-  }
-
-  ~ExternalSource()
-  {
-    Logging::cout() << "~ExternalSource" << Logging::endl;
-  }
-  void test(){
-    printf("test\n");
-  }
-
-  void my_fuse_session_loop(struct fuse_session *se) {
-
-    int res = 0;
-    while (!fuse_session_exited(se)) {
-      struct fuse_buf fbuf{.mem= NULL} ;
-
-
-      //printf("Before receive_buf %lu \n",pthread_self());
-      res = fuse_session_receive_buf(se, &fbuf);
-      //sleep(2);
-      if (res == -EINTR) {
-        free(fbuf.mem);
-        //free(fbuf);
-        continue;
-      }
-      if (res <= 0) {
-        free(fbuf.mem);
-        //free(fbuf);
-        break;
-      }
-
-      fuse_session_process_buf(se, &fbuf);
-
+    //sleep(2);
+    if (res == -EINTR) {
+      free(fbuf.mem);
+      //free(fbuf);
+      continue;
+    }
+    if (res <= 0) {
+      free(fbuf.mem);
+      //free(fbuf);
+      break;
     }
 
-
+    when() <<[=](){
+      fuse_session_process_buf(se, &fbuf);
+    };
   }
-};
-
-void my_session_loop(SystematicTestHarness* harness,struct fuse_session *se)
-{
-  auto& alloc = ThreadAlloc::get();
-  auto* p = new (alloc) Poller();
-  auto es = std::make_shared<ExternalSource>(p);
-
-
-  schedule_lambda<YesTransfer>(p, [=]() {
-    // Start IO Thread
-    Scheduler::add_external_event_source();
-    harness->external_thread([=]() {
-      //fuse_session_loop(se);
-      es->my_fuse_session_loop(se);
-    });
-  });
+  std::cout << "out of the loop " << std::endl;
 }
+
+
+
 
 
 class filesystem_base {
@@ -178,7 +132,7 @@ public:
     std::memset(&ops_, 0, sizeof(ops_));
     ops_.init = ll_init,
     ops_.create = ll_create;
-    //ops_.release = ll_release;
+    ops_.release = ll_release;
     ops_.unlink = ll_unlink;
     ops_.forget = ll_forget;
     //ops_.forget_multi = ll_forget_multi;
@@ -203,7 +157,7 @@ public:
     //ops_.link = ll_link;
     ops_.access = ll_access;
     //ops_.mknod = ll_mknod;
-    //ops_.fallocate = ll_fallocate;
+    ops_.fallocate = ll_fallocate;
   }
 
 
@@ -259,12 +213,14 @@ public:
   virtual int opendir(fuse_ino_t ino, int flags, uid_t uid, gid_t gid,fuse_req_t req,struct fuse_file_info *fi) = 0;
   //virtual void releasedir(fuse_ino_t ino) = 0;
 
+  virtual void my_fallocate(fuse_req_t req, fuse_ino_t ino, int mode,off_t offset, off_t length, fuse_file_info *fi) = 0;
+
   virtual int create(fuse_ino_t parent_ino,const std::string& name,mode_t mode,int flags,uid_t uid,gid_t gid,fuse_req_t req,struct fuse_file_info* fi)= 0;
 
   virtual int open(fuse_ino_t ino, int flags, FileHandle** fhp, uid_t uid, gid_t gid,  struct fuse_file_info* fi,fuse_req_t req) = 0;
-  virtual ssize_t write(FileHandle* fh, const char * buf, size_t size, off_t off, struct fuse_file_info *fi,fuse_req_t req, int *ptr)= 0;
-  virtual ssize_t read(FileHandle* fh, off_t offset, size_t size, fuse_req_t req) = 0;
-  //virtual void release(fuse_ino_t ino, FileHandle* fh) = 0;
+  virtual ssize_t write(FileHandle* fh, const char * buf, size_t size, off_t off, struct fuse_file_info *fi,fuse_req_t req, int *ptr, fuse_ino_t ino)= 0;
+  virtual ssize_t read(FileHandle* fh, off_t offset, size_t size, fuse_req_t req,fuse_ino_t ino) = 0;
+  virtual void release(fuse_ino_t ino, FileHandle* fh) = 0;
 
 private:
   static filesystem_base* get(fuse_req_t req) {
@@ -283,6 +239,26 @@ private:
   static void ll_init(void *userdata,
                       struct fuse_conn_info *conn)
   {
+    conn->want &= ~FUSE_CAP_AUTO_INVAL_DATA;
+
+
+    if(conn->capable & FUSE_CAP_PARALLEL_DIROPS)
+      conn->want |= FUSE_CAP_PARALLEL_DIROPS;
+
+    if(conn->capable & FUSE_CAP_ASYNC_READ)
+      conn->want |= FUSE_CAP_ASYNC_READ;
+
+    if (conn->capable & FUSE_CAP_WRITEBACK_CACHE)
+      conn->want |= FUSE_CAP_WRITEBACK_CACHE;
+
+    if(conn->capable & FUSE_CAP_ASYNC_DIO)
+      conn->want |= FUSE_CAP_ASYNC_DIO;
+
+    if (conn->capable & FUSE_CAP_SPLICE_WRITE)
+      conn->want |= FUSE_CAP_SPLICE_WRITE;
+
+    if (conn->capable & FUSE_CAP_SPLICE_READ)
+      conn->want |= FUSE_CAP_SPLICE_READ;
 
     auto fs = get(userdata);
     fs->init(userdata,conn);
@@ -303,14 +279,14 @@ private:
 
 
 
-  //static void
-  //ll_release(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info* fi) {
-  //  auto fs = get(req);
-  //  auto fh = reinterpret_cast<FileHandle*>(fi->fh);
-  //
-  //  fs->release(ino, fh);
-  //  fuse_reply_err(req, 0);
-  //}
+  static void
+  ll_release(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info* fi) {
+    auto fs = get(req);
+    auto fh = reinterpret_cast<FileHandle*>(fi->fh);
+
+    fs->release(ino, fh);
+    fuse_reply_err(req, 0);
+  }
 
   static void ll_unlink(fuse_req_t req, fuse_ino_t parent, const char* name) {
     auto fs = get(req);
@@ -347,13 +323,9 @@ private:
   ll_getattr(fuse_req_t req, fuse_ino_t ino, struct fuse_file_info* fi) {
     auto fs = get(req);
     const struct fuse_ctx* ctx = fuse_req_ctx(req);
-    struct stat st;
-    //printf("Adress is %p\n",req->buf_mem);
+
+
     fs->getattr(ino, ctx->uid, ctx->gid,req,req->buf_mem);
-    //if (ret == 0)
-    //  fuse_reply_attr(req, &st, ret);
-    //else
-    //  fuse_reply_err(req, -ret);
   }
 
 
@@ -362,6 +334,7 @@ private:
 
   static void ll_lookup(fuse_req_t req, fuse_ino_t parent, const char* name) {
     auto fs = get(req);
+    //printf("in lookup\n");
     fs->lookup(parent, name,req);
   }
 
@@ -388,6 +361,8 @@ private:
     struct fuse_file_info* fi) {
     auto fs = get(req);
 
+    //printf("in readdir, thread %lu \n",pthread_self());
+
 
     fs->readdir(req, ino,  size, off);
   }
@@ -406,7 +381,6 @@ private:
 
     // new files are handled by ll_create
     assert(!(fi->flags & O_CREAT));
-
     FileHandle* fh;
     fs->open(ino, fi->flags, &fh, ctx->uid, ctx->gid,fi,req);
 
@@ -418,15 +392,21 @@ private:
     //}
   }
 
+
+
   static void ll_write (fuse_req_t req, fuse_ino_t ino, const char *buf,size_t size, off_t off, struct fuse_file_info *fi) {
 
     auto fs = get(req);
     auto fh = reinterpret_cast<FileHandle*>(fi->fh);
 
-    //std::cout << "I am thread " << pthread_self() << std::endl;
+    //std::cout << "I am thread in write" << pthread_self() <<  "for ino " << ino << std::endl;
+
+    //printf("in write for ino %lu and size %lu \n",ino,size);
+    //while (1 );
+    //count++;
     //printf("seeing memory at %d\n",*req->buf_mem);
-    printf("Address in write %lu\n",fi->fh);
-    fs->write(fh,buf,size,off,fi,req,req->buf_mem);
+    //printf("Address in write %lu\n",fi->fh);
+    fs->write(fh,buf,size,off,fi,req,req->buf_mem,ino);
     //TODO REMOVE AND CHANGE
     //if (ret >= 0)
     //  fuse_reply_write(req, ret);
@@ -442,13 +422,7 @@ private:
     struct fuse_file_info* fi) {
     auto fs = get(req);
     auto fh = reinterpret_cast<FileHandle*>(fi->fh);
-
-
-    //printf("\nread offset %ld\n",off);
-    auto time = std::time(nullptr);
-    //printf("req in ll_read %d, time: %d\n",req,time);
-    printf("Adress in read %lu\n",fi->fh);
-    fs->read(fh, off, size, req);
+    fs->read(fh, off, size, req, ino);
     //TODO: REMOVE IT FROM HERE AND PLACE IT IN THE CORRECT POSITION
     //if (ret >= 0)
     //  fuse_reply_buf(req, buf.get(), ret);
@@ -604,14 +578,10 @@ private:
   //  }
   //}
 
-  static void ll_fallocate(
-    fuse_req_t req,
-    fuse_ino_t ino,
-    int mode,
-    off_t offset,
-    off_t length,
-    struct fuse_file_info* fi) {
-    fuse_reply_err(req, 0);
+  //TODO IMPLEMENT FALLOCATE
+  static void ll_fallocate(fuse_req_t req,fuse_ino_t ino,int mode,off_t offset,off_t length,struct fuse_file_info* fi) {
+    auto fs = get(req);
+    fs->my_fallocate(req,ino,mode,offset,length,fi);
   }
 
 protected:
@@ -624,11 +594,10 @@ protected:
 };
 
 
-static void reply_create_success(struct fuse_file_info* fi,FileHandle* fh,fuse_req_t req,struct stat st){
+static void reply_create_success(const struct fuse_file_info* fi,FileHandle* fh,fuse_req_t req,struct stat st){
   struct fuse_entry_param fe;
   std::memset(&fe, 0, sizeof(fe));
 
-  fi->fh = reinterpret_cast<uint64_t>(fh);
   fe.attr = st;
   fe.ino = fe.attr.st_ino;
   fe.generation = 0;
@@ -642,15 +611,7 @@ static void reply_lookup_success(struct fuse_entry_param fe,fuse_req_t req){
   fuse_reply_entry(req, &fe);
 }
 
-static void reply_readdir(fuse_req_t req,char *buf,size_t ret){
-  if (ret >= 0) {
-    fuse_reply_buf(req, buf, (size_t)ret);
-  } else {
-    //FIXME: ELSE WILL NEVER BE EXECUTED
-    int r = (int)ret;
-    fuse_reply_err(req, -r);
-  }
-}
+
 
 static void reply_mkdir(struct stat st,fuse_req_t req){
   struct fuse_entry_param fe;
@@ -662,12 +623,7 @@ static void reply_mkdir(struct stat st,fuse_req_t req){
   fuse_reply_entry(req, &fe);
 }
 
-static void reply_write(int ret,fuse_req_t req){
-  if (ret >= 0)
-    fuse_reply_write(req, ret);
-  else
-    fuse_reply_err(req, -ret);
-}
+
 
 static void reply_read(int ret,fuse_req_t req,char *buf){
   if (ret >= 0)
