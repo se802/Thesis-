@@ -251,12 +251,10 @@ void RegInode::write(const char* buf, size_t size, off_t offset,fuse_req_t req,s
 
 
 
-
 //FIXME: What if someone does lseek(fd,1000,SEEK_CUR) --> write(fd,"a",1), and someone tries to read from offset 0? what will it return
 int RegInode::read( size_t size, off_t offset, fuse_req_t req)
 {
-
-
+  auto init_req_mem = req->buf_mem;
   // Calculate the block ID based on the offset
   u_int64_t bytes_read = 0;
   u_int64_t blockId;
@@ -265,11 +263,19 @@ int RegInode::read( size_t size, off_t offset, fuse_req_t req)
   remaining_size = std::max(remaining_size,0l);
 
   if(remaining_size == 0)
+  {
     fuse_reply_buf(req, NULL, 0);
+    free(init_req_mem);
+    return 0;
+  }
+
+
 
   u_int64_t total = remaining_size;
 
   char *buf = static_cast<char*>(malloc(sizeof(char) * remaining_size));
+
+
   auto counter = make_cown<Counter>();
   while (remaining_size > 0)
   {
@@ -295,8 +301,16 @@ int RegInode::read( size_t size, off_t offset, fuse_req_t req)
         //printf("ctr: %d, total: %d\n",ctr->count,total);
         if(ctr->count == total)
         {
-          reply_read(ctr->count,req,buf);
+          int ret = ctr->count;
+          if (ret >= 0)
+            fuse_reply_buf(req, buf, ret);
+          else
+            fuse_reply_err(req, -ret);
+
+          free(buf);
+          free(init_req_mem);
         }
+        return 0;
       };
     };
     bytes_read += bytes_to_read;
@@ -304,6 +318,7 @@ int RegInode::read( size_t size, off_t offset, fuse_req_t req)
   }
   return 0;
   //printf("offset: %ld, bytes_read %lu, size:%zud, bytes_read %lu, file_size: %ld, remaining size %ld\n",offset,bytes_read ,size,bytes_read,i_st.st_size,remaining_size);
+
 }
 
 
@@ -693,7 +708,7 @@ int FileSystem::access(struct stat i_st, int mask, uid_t uid, gid_t gid) {
 int FileSystem::create(fuse_ino_t parent_ino, const std::string& name, mode_t mode, int flags, uid_t uid, gid_t gid, fuse_req_t req, struct fuse_file_info* fi2)
 {
   //fi->direct_io = 1;
-  struct fuse_file_info fi{};
+  struct fuse_file_info fi = *fi2;
   fi.parallel_direct_writes = 1;
   fi.direct_io = 1;
   fi.fh = 1;
@@ -1293,8 +1308,6 @@ int FileSystem::mkdir(fuse_ino_t parent_ino, const std::string& name, mode_t mod
 
 int FileSystem::open(fuse_ino_t ino, int flags, FileHandle** fhp, uid_t uid, gid_t gid, struct fuse_file_info* fi2,fuse_req_t req)
 {
-  //fi->direct_io = 1;
-  //FIXME: ISOS ME TA WHEN NA FEVGI TO REFERENCE, NA GINETE DEALLOCATE KAI NA MIN GINETE PANTA SET?
   struct fuse_file_info fi = *fi2;
   fi.parallel_direct_writes =1;
   fi.direct_io = 1;
@@ -2030,7 +2043,7 @@ void my_test(int argc,char *argv[],SystematicTestHarness *harness){
     harness->external_thread([=]() {
 
       setbuf(stdout,0);
-      int returnValue = system("fusermount -u /home/csdeptucy/ssfs");
+      int returnValue = system("fusermount -u /home/sevag/ssfs");
 
       if (returnValue == -1) {
         // Error executing the command
@@ -2052,7 +2065,7 @@ void my_test(int argc,char *argv[],SystematicTestHarness *harness){
 
 
 
-      const char* mountpoint = "/home/csdeptucy/ssfs";
+      const char* mountpoint = "/home/sevag/ssfs";
 
 
 

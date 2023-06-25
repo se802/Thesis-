@@ -105,11 +105,13 @@ void my_fuse_session_loop(struct fuse_session *se) {
 
     //sleep(2);
     if (res == -EINTR) {
+      printf("fail1\n");
       free(fbuf.mem);
       //free(fbuf);
       continue;
     }
     if (res <= 0) {
+      printf("fail2\n");
       free(fbuf.mem);
       //free(fbuf);
       break;
@@ -625,10 +627,3 @@ static void reply_mkdir(struct stat st,fuse_req_t req){
 
 
 
-static void reply_read(int ret,fuse_req_t req,char *buf){
-  if (ret >= 0)
-    fuse_reply_buf(req, buf, ret);
-  else
-    fuse_reply_err(req, -ret);
-  free(buf);
-}
