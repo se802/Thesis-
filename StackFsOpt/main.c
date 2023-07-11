@@ -1020,15 +1020,15 @@ static void stackfs_ll_write(fuse_req_t req, fuse_ino_t ino, const char *buf,
     //count++;
     //printf("off %zu, size: %zu\n",off,size);
 
-    int res;
-    (void) ino;
+    //int res;
+    //(void) ino;
 
     //StackFS_trace("Write name : %s, inode : %llu, off : %lu, size : %zu",
     //		lo_name(req, ino), lo_inode(req, ino)->ino, off, size);
-    res = pwrite(fi->fh, buf, size, off);
+    //res = pwrite(fi->fh, buf, size, off);
 
-    if (res == -1)
-        return (void) fuse_reply_err(req, errno);
+    //if (res == -1)
+    //    return (void) fuse_reply_err(req, errno);
 
     fuse_reply_write(req, res);
 }
