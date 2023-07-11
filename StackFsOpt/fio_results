@@ -1,0 +1,174 @@
+Write results:
+
+Command: fio --blocksize=4K --filename=/tmp/ssfs/home/sevag/myram/a:/tmp/ssfs/home/sevag/myram/b:/tmp/ssfs/home/sevag/myram/c:/tmp/ssfs/home/sevag/myram/d  --ioengine=libaio --readwrite=write --size=5G --name=test --numjobs=8 --group_reporting  --iodepth=128 --end_fsync=1
+
+Results:
+
+test: (g=0): rw=write, bs=(R) 4096B-4096B, (W) 4096B-4096B, (T) 4096B-4096B, ioengine=libaio, iodepth=128
+...
+fio-3.28
+Starting 8 processes
+test: Laying out IO files (4 files / total 5120MiB)
+test: Laying out IO files (4 files / total 5120MiB)
+test: Laying out IO files (4 files / total 5120MiB)
+test: Laying out IO files (4 files / total 5120MiB)
+test: Laying out IO files (4 files / total 5120MiB)
+test: Laying out IO files (4 files / total 5120MiB)
+test: Laying out IO files (4 files / total 5120MiB)
+test: Laying out IO files (4 files / total 5120MiB)
+Jobs: 8 (f=32): [W(8)][97.6%][w=1763MiB/s][w=451k IOPS][eta 00m:01s]
+test: (groupid=0, jobs=8): err= 0: pid=72688: Sun Jun 25 16:14:02 2023
+  write: IOPS=253k, BW=988MiB/s (1036MB/s)(40.0GiB/41447msec); 0 zone resets
+    slat (usec): min=7, max=827, avg=29.94, stdev=13.63
+    clat (nsec): min=1903, max=8191.2k, avg=4016170.77, stdev=1271760.59
+     lat (usec): min=15, max=8246, avg=4046.37, stdev=1281.33
+    clat percentiles (usec):
+     |  1.00th=[ 2057],  5.00th=[ 2245], 10.00th=[ 2442], 20.00th=[ 2868],
+     | 30.00th=[ 3490], 40.00th=[ 3654], 50.00th=[ 3785], 60.00th=[ 3949],
+     | 70.00th=[ 4293], 80.00th=[ 4948], 90.00th=[ 6194], 95.00th=[ 6652],
+     | 99.00th=[ 7111], 99.50th=[ 7177], 99.90th=[ 7308], 99.95th=[ 7373],
+     | 99.99th=[ 7963]
+   bw (  KiB/s): min=567880, max=1881712, per=99.35%, avg=1005365.28, stdev=34835.88, samples=656
+   iops        : min=141970, max=470428, avg=251341.32, stdev=8708.97, samples=656
+  lat (usec)   : 2=0.01%, 4=0.01%, 20=0.01%, 50=0.01%, 100=0.01%
+  lat (usec)   : 250=0.01%, 500=0.01%, 750=0.01%, 1000=0.01%
+  lat (msec)   : 2=0.30%, 4=61.72%, 10=37.97%
+  cpu          : usr=6.76%, sys=36.20%, ctx=11581999, majf=0, minf=116
+  IO depths    : 1=0.1%, 2=0.1%, 4=0.1%, 8=0.1%, 16=0.1%, 32=0.1%, >=64=100.0%
+     submit    : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%
+     complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.1%
+     issued rwts: total=0,10485760,0,0 short=0,0,0,0 dropped=0,0,0,0
+     latency   : target=0, window=0, percentile=100.00%, depth=128
+
+Run status group 0 (all jobs):
+  WRITE: bw=988MiB/s (1036MB/s), 988MiB/s-988MiB/s (1036MB/s-1036MB/s), io=40.0GiB (42.9GB), run=41447-41447msec
+
+
+Read Results:
+
+Command: fio --blocksize=4K --filename=/tmp/ssfs/home/sevag/myram/a:/tmp/ssfs/home/sevag/myram/b:/tmp/ssfs/home/sevag/myram/c:/tmp/ssfs/home/sevag/myram/d  --ioengine=libaio --readwrite=read --size=5G --name=test --numjobs=8 --group_reporting  --iodepth=128 --end_fsync=1
+
+Results:
+
+test: (g=0): rw=read, bs=(R) 4096B-4096B, (W) 4096B-4096B, (T) 4096B-4096B, ioengine=libaio, iodepth=128
+...
+fio-3.28
+Starting 8 processes
+test: Laying out IO files (4 files / total 5120MiB)
+Jobs: 8 (f=32): [R(8)][100.0%][r=2404MiB/s][r=615k IOPS][eta 00m:00s]
+test: (groupid=0, jobs=8): err= 0: pid=72879: Sun Jun 25 16:24:18 2023
+  read: IOPS=554k, BW=2165MiB/s (2270MB/s)(40.0GiB/18920msec)
+    slat (usec): min=6, max=8182, avg=13.22, stdev= 4.63
+    clat (nsec): min=1116, max=13539k, avg=1783089.95, stdev=406242.13
+     lat (usec): min=10, max=13577, avg=1796.44, stdev=409.27
+    clat percentiles (usec):
+     |  1.00th=[ 1532],  5.00th=[ 1549], 10.00th=[ 1565], 20.00th=[ 1598],
+     | 30.00th=[ 1614], 40.00th=[ 1631], 50.00th=[ 1663], 60.00th=[ 1729],
+     | 70.00th=[ 1762], 80.00th=[ 1795], 90.00th=[ 1876], 95.00th=[ 3195],
+     | 99.00th=[ 3425], 99.50th=[ 3523], 99.90th=[ 4359], 99.95th=[ 4555],
+     | 99.99th=[ 5145]
+   bw (  MiB/s): min= 1145, max= 2527, per=100.00%, avg=2228.68, stdev=45.94, samples=289
+   iops        : min=293310, max=646942, avg=570542.66, stdev=11761.60, samples=289
+  lat (usec)   : 2=0.01%, 4=0.01%, 20=0.01%, 50=0.01%, 100=0.01%
+  lat (usec)   : 250=0.01%, 500=0.01%, 750=0.01%, 1000=0.01%
+  lat (msec)   : 2=92.48%, 4=7.30%, 10=0.21%, 20=0.01%
+  cpu          : usr=7.06%, sys=37.13%, ctx=10485845, majf=2, minf=1129
+  IO depths    : 1=0.1%, 2=0.1%, 4=0.1%, 8=0.1%, 16=0.1%, 32=0.1%, >=64=100.0%
+     submit    : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%
+     complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.1%
+     issued rwts: total=10485760,0,0,0 short=0,0,0,0 dropped=0,0,0,0
+     latency   : target=0, window=0, percentile=100.00%, depth=128
+
+Run status group 0 (all jobs):
+   READ: bw=2165MiB/s (2270MB/s), 2165MiB/s-2165MiB/s (2270MB/s-2270MB/s), io=40.0GiB (42.9GB), run=18920-18920msec
+
+
+Random Write:
+
+Command:fio --blocksize=4K --filename=/tmp/ssfs/home/sevag/myram/a:/tmp/ssfs/home/sevag/myram/b:/tmp/ssfs/home/sevag/myram/c:/tmp/ssfs/home/sevag/myram/d  --ioengine=libaio --readwrite=randwrite --size=5G --name=test --numjobs=8 --group_reporting  --iodepth=128 --end_fsync=1
+
+Results:
+
+test: (g=0): rw=randwrite, bs=(R) 4096B-4096B, (W) 4096B-4096B, (T) 4096B-4096B, ioengine=libaio, iodepth=128
+...
+fio-3.28
+Starting 8 processes
+test: Laying out IO files (4 files / total 5120MiB)
+test: Laying out IO files (4 files / total 5120MiB)
+test: Laying out IO files (4 files / total 5120MiB)
+test: Laying out IO files (4 files / total 5120MiB)
+test: Laying out IO files (4 files / total 5120MiB)
+test: Laying out IO files (4 files / total 5120MiB)
+test: Laying out IO files (4 files / total 5120MiB)
+test: Laying out IO files (4 files / total 5120MiB)
+Jobs: 2 (f=8): [w(1),_(1),w(1),_(5)][100.0%][w=1860MiB/s][w=476k IOPS][eta 00m:0Jobs: 1 (f=0): [f(1),_(7)][100.0%][w=111MiB/s][w=28.5k IOPS][eta 00m:00s]
+test: (groupid=0, jobs=8): err= 0: pid=73839: Sun Jun 25 16:42:09 2023
+  write: IOPS=503k, BW=1963MiB/s (2058MB/s)(40.0GiB/20865msec); 0 zone resets
+    slat (usec): min=7, max=1992, avg=14.10, stdev= 4.59
+    clat (nsec): min=1161, max=7803.4k, avg=1918109.21, stdev=483785.05
+     lat (usec): min=10, max=8745, avg=1932.36, stdev=487.39
+    clat percentiles (usec):
+     |  1.00th=[ 1549],  5.00th=[ 1598], 10.00th=[ 1614], 20.00th=[ 1663],
+     | 30.00th=[ 1696], 40.00th=[ 1745], 50.00th=[ 1795], 60.00th=[ 1827],
+     | 70.00th=[ 1860], 80.00th=[ 1909], 90.00th=[ 2212], 95.00th=[ 3326],
+     | 99.00th=[ 3556], 99.50th=[ 3916], 99.90th=[ 4621], 99.95th=[ 4621],
+     | 99.99th=[ 5211]
+   bw (  MiB/s): min= 1088, max= 2474, per=100.00%, avg=2070.33, stdev=48.97, samples=313
+   iops        : min=278673, max=633378, avg=530004.33, stdev=12536.57, samples=313
+  lat (usec)   : 2=0.01%, 4=0.01%, 20=0.01%, 50=0.01%, 100=0.01%
+  lat (usec)   : 250=0.01%, 500=0.01%, 750=0.01%, 1000=0.01%
+  lat (msec)   : 2=85.73%, 4=13.82%, 10=0.44%
+  cpu          : usr=7.99%, sys=37.68%, ctx=10486035, majf=0, minf=115
+  IO depths    : 1=0.1%, 2=0.1%, 4=0.1%, 8=0.1%, 16=0.1%, 32=0.1%, >=64=100.0%
+     submit    : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%
+     complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.1%
+     issued rwts: total=0,10485760,0,0 short=0,0,0,0 dropped=0,0,0,0
+     latency   : target=0, window=0, percentile=100.00%, depth=128
+
+Run status group 0 (all jobs):
+  WRITE: bw=1963MiB/s (2058MB/s), 1963MiB/s-1963MiB/s (2058MB/s-2058MB/s), io=40.0GiB (42.9GB), run=20865-20865msec
+
+
+
+
+Random Read:
+
+Command: fio --blocksize=4K --filename=/tmp/ssfs/home/sevag/myram/a:/tmp/ssfs/home/sevag/myram/b:/tmp/ssfs/home/sevag/myram/c:/tmp/ssfs/home/sevag/myram/d  --ioengine=libaio --readwrite=randread --size=5G --name=test --numjobs=8 --group_reporting  --iodepth=128 --end_fsync=1
+
+Results:
+
+test: (g=0): rw=randread, bs=(R) 4096B-4096B, (W) 4096B-4096B, (T) 4096B-4096B, ioengine=libaio, iodepth=128
+...
+fio-3.28
+Starting 8 processes
+Jobs: 2 (f=8): [_(2),r(2),_(4)][100.0%][r=1069MiB/s][r=274k IOPS][eta 00m:00s]
+test: (groupid=0, jobs=8): err= 0: pid=73747: Sun Jun 25 16:41:03 2023
+  read: IOPS=521k, BW=2035MiB/s (2134MB/s)(40.0GiB/20125msec)
+    slat (usec): min=7, max=350, avg=13.91, stdev= 4.36
+    clat (nsec): min=1244, max=7429.7k, avg=1889642.39, stdev=483181.08
+     lat (usec): min=9, max=7713, avg=1903.69, stdev=486.80
+    clat percentiles (usec):
+     |  1.00th=[ 1549],  5.00th=[ 1582], 10.00th=[ 1614], 20.00th=[ 1631],
+     | 30.00th=[ 1663], 40.00th=[ 1696], 50.00th=[ 1778], 60.00th=[ 1827],
+     | 70.00th=[ 1844], 80.00th=[ 1876], 90.00th=[ 2057], 95.00th=[ 3359],
+     | 99.00th=[ 3523], 99.50th=[ 3654], 99.90th=[ 4178], 99.95th=[ 4621],
+     | 99.99th=[ 5407]
+   bw (  MiB/s): min= 1121, max= 2456, per=100.00%, avg=2104.94, stdev=50.18, samples=308
+   iops        : min=287104, max=628952, avg=538863.67, stdev=12844.92, samples=308
+  lat (usec)   : 2=0.01%, 4=0.01%, 20=0.01%, 50=0.01%, 100=0.01%
+  lat (usec)   : 250=0.01%, 500=0.01%, 750=0.01%, 1000=0.01%
+  lat (msec)   : 2=89.28%, 4=10.55%, 10=0.17%
+  cpu          : usr=7.74%, sys=36.32%, ctx=10485855, majf=0, minf=1123
+  IO depths    : 1=0.1%, 2=0.1%, 4=0.1%, 8=0.1%, 16=0.1%, 32=0.1%, >=64=100.0%
+     submit    : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.0%
+     complete  : 0=0.0%, 4=100.0%, 8=0.0%, 16=0.0%, 32=0.0%, 64=0.0%, >=64=0.1%
+     issued rwts: total=10485760,0,0,0 short=0,0,0,0 dropped=0,0,0,0
+     latency   : target=0, window=0, percentile=100.00%, depth=128
+
+Run status group 0 (all jobs):
+   READ: bw=2035MiB/s (2134MB/s), 2035MiB/s-2035MiB/s (2134MB/s-2134MB/s), io=40.0GiB (42.9GB), run=20125-20125msec
+
+
+
+
+

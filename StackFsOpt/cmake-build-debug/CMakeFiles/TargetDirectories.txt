@@ -1,0 +1,3 @@
+/home/sevag/CLionProjects/StackFsOpt/cmake-build-debug/CMakeFiles/StackFsOpt.dir
+/home/sevag/CLionProjects/StackFsOpt/cmake-build-debug/CMakeFiles/edit_cache.dir
+/home/sevag/CLionProjects/StackFsOpt/cmake-build-debug/CMakeFiles/rebuild_cache.dir
