@@ -65,7 +65,7 @@ public:
   virtual void my_fallocate(fuse_req_t req, fuse_ino_t ino, int mode,off_t offset, off_t length, fuse_file_info *fi) = 0;
   virtual int create(fuse_ino_t parent_ino,const std::string& name,mode_t mode,int flags,uid_t uid,gid_t gid,fuse_req_t req,struct fuse_file_info* fi)= 0;
   virtual int open(fuse_ino_t ino, int flags, FileHandle** fhp, uid_t uid, gid_t gid,  struct fuse_file_info* fi,fuse_req_t req) = 0;
-  virtual ssize_t write(FileHandle* fh, const char * buf, size_t size, off_t off, struct fuse_file_info *fi,fuse_req_t req, int *ptr, fuse_ino_t ino)= 0;
+  virtual ssize_t write(FileHandle* fh, const char * buf, size_t size, off_t off, struct fuse_file_info *fi,fuse_req_t req, char *ptr, fuse_ino_t ino)= 0;
   virtual ssize_t read(FileHandle* fh, off_t offset, size_t size, fuse_req_t req,fuse_ino_t ino) = 0;
   virtual void release(fuse_ino_t ino, FileHandle* fh) = 0;
 
@@ -178,10 +178,11 @@ private:
 
 
   static void ll_write (fuse_req_t req, fuse_ino_t ino, const char *buf,size_t size, off_t off, struct fuse_file_info *fi) {
-    fuse_reply_write(req,size);
-    //auto fs = get(req);
+
+    auto fs = get(req);
     //auto fh = reinterpret_cast<FileHandle*>(fi->fh);
-    //fs->write(fh,buf,size,off,fi,req,NULL,ino);
+
+    fs->write(nullptr,buf,size,off,fi,req,NULL,ino);
   }
 
   static void ll_read(fuse_req_t req,fuse_ino_t ino,size_t size,off_t off,struct fuse_file_info* fi) {
@@ -269,7 +270,7 @@ public:
   int lookup(fuse_ino_t parent_ino, const std::string& name,fuse_req_t req) override;
   void init(void *userdata,struct fuse_conn_info *conn) override;
   int open(fuse_ino_t ino, int flags, FileHandle** fhp, uid_t uid, gid_t gid,  struct fuse_file_info* fi,fuse_req_t req) override;
-  ssize_t write(FileHandle* fh, const char * buf, size_t size, off_t off, struct fuse_file_info *fi,fuse_req_t req,int * ptr, fuse_ino_t ino) override;
+  ssize_t write(FileHandle* fh, const char * buf, size_t size, off_t off, struct fuse_file_info *fi,fuse_req_t req,char * ptr, fuse_ino_t ino) override;
   ssize_t read(FileHandle* fh, off_t offset, size_t size,fuse_req_t req, fuse_ino_t ino) override;
   int unlink(fuse_ino_t parent_ino, const std::string& name, uid_t uid, gid_t gid,fuse_req_t req) override;
   int rmdir(fuse_ino_t parent_ino, const std::string& name, uid_t uid, gid_t gid,fuse_req_t req) override;

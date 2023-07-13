@@ -38,13 +38,13 @@ public:
 
 
 
-void batch_write(const std::vector<Wrapper>& blocks,fuse_req_t req,size_t size)
+void batch_write(const std::vector<Wrapper>& blocks,fuse_req_t req,size_t size,char *ptr)
 {
   if (blocks.size() == 1)
   {
     when(blocks[0].ptr_) << [=](acquired_cown<Block> blk0) {
       blk0->write(blocks[0].read_buf_,blocks[0].bytes_to_write_,blocks[0].block_offset_,blocks[0].bytes_written_);
-      fuse_reply_write(req, size);
+      free((void*)ptr);
     };
   }
 
@@ -53,12 +53,12 @@ void batch_write(const std::vector<Wrapper>& blocks,fuse_req_t req,size_t size)
     when(blocks[0].ptr_, blocks[1].ptr_) << [=](acquired_cown<Block> blk0, acquired_cown<Block> blk1) {
       blk0->write(blocks[0].read_buf_,blocks[0].bytes_to_write_,blocks[0].block_offset_,blocks[0].bytes_written_);
       blk1->write(blocks[1].read_buf_,blocks[1].bytes_to_write_,blocks[1].block_offset_,blocks[1].bytes_written_);
-      fuse_reply_write(req, size);
+      free((void*)ptr);
     };
   }
 }
 
-void RegInode::write(const char* buf, size_t size, off_t offset,fuse_req_t req,std::atomic<size_t >&avail_bytes, int *ptr)
+void RegInode::write(const char* buf, size_t size, off_t offset,fuse_req_t req,std::atomic<size_t >&avail_bytes, char *ptr)
 {
   auto now = std::time(nullptr);
   i_st.st_ctime = now;
@@ -95,13 +95,13 @@ void RegInode::write(const char* buf, size_t size, off_t offset,fuse_req_t req,s
     size_t bytes_to_write = std::min(BLOCK_SIZE - block_offset, remaining_size);
     cown_ptr<Block> blk = data_blocks.at(blockId);
 
-    Wrapper wrapper(blk,bytes_to_write,block_offset,bytes_written,size,buf);
+    Wrapper wrapper(blk,bytes_to_write,block_offset,bytes_written,size,ptr);
     vec_array.push_back(wrapper);
 
     bytes_written += bytes_to_write;
     remaining_size -= bytes_to_write;
   }
-  batch_write(vec_array,req,size);
+  batch_write(vec_array,req,size,ptr);
 }
 
 
@@ -157,7 +157,7 @@ int RegInode::read( size_t size, off_t offset, fuse_req_t req)
         //printf("ctr: %d, total: %d\n",ctr->count,total);
         if(ctr->count == total)
         {
-          printf("ctr: %d, total: %d\n",ctr->count,total);
+          //printf("ctr: %d, total: %d\n",ctr->count,total);
           int ret = ctr->count;
           if (ret >= 0)
             fuse_reply_buf(req, buf, ret);

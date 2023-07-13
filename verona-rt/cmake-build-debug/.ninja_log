@@ -1,0 +1,12 @@
+# ninja log v5
+3	232	1689162959301060630	test/CMakeFiles/func-con-hello_cpp.dir/func/hello_cpp/Block.cpp.o	ed4b0f1d412b4787
+4	3846	1689179058508633963	test/CMakeFiles/func-con-hello_cpp.dir/func/hello_cpp/RegInode.cpp.o	2dd4043ec91365ea
+9	550	1689179881125839049	build.ninja	7aa4018d23f0b846
+4	3813	1689179848302110162	test/CMakeFiles/func-con-hello_cpp.dir/func/hello_cpp/main.cpp.o	bd0bdda8619d847c
+3813	4132	1689179848626107487	test/func-con-hello_cpp	86d9161859fc90c4
+0	8	0	/home/sevag/verona-rt/cmake-build-debug/CMakeFiles/cmake.verify_globs	3a6bc9d49725d15d
+3	4941	1689179059596624976	test/CMakeFiles/func-con-hello_cpp.dir/func/hello_cpp/FileSystem.cpp.o	7e0064e982643334
+3	1939	1689179056604649691	test/CMakeFiles/func-con-hello_cpp.dir/func/hello_cpp/DirInode.cpp.o	6785bd499c9377a3
+4	1930	1689179056596649757	test/CMakeFiles/func-con-hello_cpp.dir/func/hello_cpp/Inode.cpp.o	d2d33acd8c7adbf1
+9	508	1689179881125839049	build.ninja	7aa4018d23f0b846
+0	8	0	/home/sevag/verona-rt/cmake-build-debug/CMakeFiles/cmake.verify_globs	3a6bc9d49725d15d

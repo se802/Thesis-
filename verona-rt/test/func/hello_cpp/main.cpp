@@ -21,10 +21,46 @@ using namespace verona::cpp;
 
 #define PATH "/home/sevag/ssfs"
 
+
+short CorePin(int coreID)
+{
+  short status=0;
+  int nThreads = std::thread::hardware_concurrency();
+  //std::cout<<nThreads;
+  cpu_set_t set;
+  std::cout<<"\nPinning to Core:"<<coreID<<"\n";
+  CPU_ZERO(&set);
+
+  if(coreID == -1)
+  {
+    status=-1;
+    std::cout<<"CoreID is -1"<<"\n";
+    return status;
+  }
+
+  if(coreID > nThreads)
+  {
+    std::cout<<"Invalid CORE ID"<<"\n";
+    return status;
+  }
+
+  CPU_SET(coreID,&set);
+  if(sched_setaffinity(0, sizeof(cpu_set_t), &set) < 0)
+  {
+    std::cout<<"Unable to Set Affinity"<<"\n";
+    return -1;
+  }
+  return 1;
+}
+
+
 void start_dispatcher(int argc, char* argv[], SystematicTestHarness* harness) {
   when() << [=]() {
     Scheduler::add_external_event_source();
     harness->external_thread([=]() {
+      auto x = CorePin(40);
+      if(x!=1)
+        exit(1);
 
       setbuf(stdout, 0);
       int returnValue = system("fusermount -u " PATH);
@@ -55,7 +91,9 @@ void start_dispatcher(int argc, char* argv[], SystematicTestHarness* harness) {
       fuse_set_signal_handlers(se);
       fuse_session_mount(se, mountpoint);
       fuse_daemonize(true);
-      fuse_session_loop_mt(se,NULL);
+
+      my_fuse_session_loop(se);
+
       fuse_session_unmount(se);
       fuse_remove_signal_handlers(se);
       fuse_session_destroy(se);
@@ -75,7 +113,7 @@ int main(int argc, char *argv[]) {
 
 
   Scheduler& sched = Scheduler::get();
-  sched.init(20);
+  sched.init(4);
   start_dispatcher(argc, argv, &harness);  // Pass the validated path argument
 
   sched.run();

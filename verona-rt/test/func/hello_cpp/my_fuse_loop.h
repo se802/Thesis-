@@ -88,6 +88,11 @@ restart:
 
 
 
+
+int count =0;
+
+
+
 int my_fuse_session_loop(struct fuse_session *se)
 {
   int res = 0;
@@ -97,7 +102,7 @@ int my_fuse_session_loop(struct fuse_session *se)
 
   while (!fuse_session_exited(se)) {
     res = my_fuse_session_receive_buf_int(se, &fbuf,NULL);
-
+   
     if (res == -EINTR)
       continue;
     if (res <= 0)

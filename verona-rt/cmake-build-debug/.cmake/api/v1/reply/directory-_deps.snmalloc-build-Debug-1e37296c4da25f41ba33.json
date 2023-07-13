@@ -1,0 +1,185 @@
+{
+	"backtraceGraph" : 
+	{
+		"commands" : 
+		[
+			"install"
+		],
+		"files" : 
+		[
+			"cmake-build-debug/_deps/snmalloc-src/CMakeLists.txt"
+		],
+		"nodes" : 
+		[
+			{
+				"file" : 0
+			},
+			{
+				"command" : 0,
+				"file" : 0,
+				"line" : 529,
+				"parent" : 0
+			},
+			{
+				"command" : 0,
+				"file" : 0,
+				"line" : 530,
+				"parent" : 0
+			},
+			{
+				"command" : 0,
+				"file" : 0,
+				"line" : 531,
+				"parent" : 0
+			},
+			{
+				"command" : 0,
+				"file" : 0,
+				"line" : 532,
+				"parent" : 0
+			},
+			{
+				"command" : 0,
+				"file" : 0,
+				"line" : 533,
+				"parent" : 0
+			},
+			{
+				"command" : 0,
+				"file" : 0,
+				"line" : 534,
+				"parent" : 0
+			},
+			{
+				"command" : 0,
+				"file" : 0,
+				"line" : 535,
+				"parent" : 0
+			},
+			{
+				"command" : 0,
+				"file" : 0,
+				"line" : 543,
+				"parent" : 0
+			},
+			{
+				"command" : 0,
+				"file" : 0,
+				"line" : 545,
+				"parent" : 0
+			}
+		]
+	},
+	"installers" : 
+	[
+		{
+			"backtrace" : 1,
+			"component" : "Unspecified",
+			"destination" : "include/snmalloc",
+			"paths" : 
+			[
+				"cmake-build-debug/_deps/snmalloc-src/src/snmalloc/aal"
+			],
+			"type" : "directory"
+		},
+		{
+			"backtrace" : 2,
+			"component" : "Unspecified",
+			"destination" : "include/snmalloc",
+			"paths" : 
+			[
+				"cmake-build-debug/_deps/snmalloc-src/src/snmalloc/ds"
+			],
+			"type" : "directory"
+		},
+		{
+			"backtrace" : 3,
+			"component" : "Unspecified",
+			"destination" : "include/snmalloc",
+			"paths" : 
+			[
+				"cmake-build-debug/_deps/snmalloc-src/src/snmalloc/override"
+			],
+			"type" : "directory"
+		},
+		{
+			"backtrace" : 4,
+			"component" : "Unspecified",
+			"destination" : "include/snmalloc",
+			"paths" : 
+			[
+				"cmake-build-debug/_deps/snmalloc-src/src/snmalloc/backend"
+			],
+			"type" : "directory"
+		},
+		{
+			"backtrace" : 5,
+			"component" : "Unspecified",
+			"destination" : "include/snmalloc",
+			"paths" : 
+			[
+				"cmake-build-debug/_deps/snmalloc-src/src/snmalloc/mem"
+			],
+			"type" : "directory"
+		},
+		{
+			"backtrace" : 6,
+			"component" : "Unspecified",
+			"destination" : "include/snmalloc",
+			"paths" : 
+			[
+				"cmake-build-debug/_deps/snmalloc-src/src/snmalloc/pal"
+			],
+			"type" : "directory"
+		},
+		{
+			"backtrace" : 7,
+			"component" : "Unspecified",
+			"destination" : "include/snmalloc/test",
+			"paths" : 
+			[
+				"cmake-build-debug/_deps/snmalloc-src/src/test/measuretime.h",
+				"cmake-build-debug/_deps/snmalloc-src/src/test/opt.h",
+				"cmake-build-debug/_deps/snmalloc-src/src/test/setup.h",
+				"cmake-build-debug/_deps/snmalloc-src/src/test/usage.h",
+				"cmake-build-debug/_deps/snmalloc-src/src/test/xoroshiro.h"
+			],
+			"type" : "file"
+		},
+		{
+			"backtrace" : 8,
+			"component" : "Unspecified",
+			"destination" : "include/snmalloc",
+			"paths" : 
+			[
+				"cmake-build-debug/_deps/snmalloc-src/src/snmalloc/snmalloc.h",
+				"cmake-build-debug/_deps/snmalloc-src/src/snmalloc/snmalloc_core.h",
+				"cmake-build-debug/_deps/snmalloc-src/src/snmalloc/snmalloc_front.h"
+			],
+			"type" : "file"
+		},
+		{
+			"backtrace" : 9,
+			"component" : "Unspecified",
+			"destination" : "share/snmalloc",
+			"exportName" : "snmallocConfig",
+			"exportTargets" : 
+			[
+				{
+					"id" : "snmalloc::@270ba9f924a5faccb0fa",
+					"index" : 0
+				}
+			],
+			"paths" : 
+			[
+				"_deps/snmalloc-build/CMakeFiles/Export/43135d38e178c7a1b69df443136c9627/snmalloc-config.cmake"
+			],
+			"type" : "export"
+		}
+	],
+	"paths" : 
+	{
+		"build" : "_deps/snmalloc-build",
+		"source" : "cmake-build-debug/_deps/snmalloc-src"
+	}
+}

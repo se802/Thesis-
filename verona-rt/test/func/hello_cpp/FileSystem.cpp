@@ -301,7 +301,10 @@ int FileSystem::create(fuse_ino_t parent_ino, const std::string& name, mode_t mo
     fe.ino = fe.attr.st_ino;
     fe.generation = 0;
     fe.entry_timeout = 1.0;
-    fuse_reply_create(req, &fe, &fi);
+    FileHandle* fhp = fh.release();
+    struct fuse_file_info copy = fi;
+    copy.fh=reinterpret_cast<uint64_t >(fhp);
+    fuse_reply_create(req, &fe, &copy);
     return 0;
   };
   return 0;
@@ -448,6 +451,7 @@ int FileSystem::getattr(fuse_ino_t ino, uid_t uid, gid_t gid, fuse_req_t req,int
 
 int FileSystem::setattr(fuse_ino_t ino, FileHandle* fh, struct stat* x, int to_set, uid_t uid, gid_t gid, fuse_req_t req)
 {
+  //FileHandle copy = *fh1;
 
   //Case where it's a regular inode
   struct stat attr = *x;
@@ -901,18 +905,22 @@ int FileSystem::open(fuse_ino_t ino, int flags, FileHandle** fhp, uid_t uid, gid
   return 0;
 }
 
-ssize_t FileSystem::write(FileHandle* fh, const char* buf, size_t size, off_t off, struct fuse_file_info* fi, fuse_req_t req, int *ptr,fuse_ino_t ino)
+ssize_t FileSystem::write(FileHandle* fh, const char* buf, size_t size, off_t off, struct fuse_file_info* fi, fuse_req_t req, char *ptr,fuse_ino_t ino)
 {
 
-  //ino--;
-  //
-  //auto allocated_cown = reinterpret_cast<ActualCown<RegInode>*>(ino);
-  //allocated_cown->acquire_strong_from_weak();
-  //cown_ptr<RegInode> reg_inode = cown_ptr<RegInode>(allocated_cown);
-  //
-  //when(reg_inode) << [=](acquired_cown<RegInode> reg_in){
-  //  reg_in->write(buf,size,off,req,avail_bytes_,ptr);
-  //};
+
+  ino--;
+
+  auto allocated_cown = reinterpret_cast<ActualCown<RegInode>*>(ino);
+  allocated_cown->acquire_strong_from_weak();
+  cown_ptr<RegInode> reg_inode = cown_ptr<RegInode>(allocated_cown);
+
+  when(reg_inode) << [=](acquired_cown<RegInode> reg_in){
+    char *copy = static_cast<char*>(malloc(size));
+    memcpy(copy,buf,size);
+    fuse_reply_write(req,size);
+    reg_in->write(buf,size,off,req,avail_bytes_,copy);
+  };
 
   return 0;
 }
@@ -932,7 +940,7 @@ ssize_t FileSystem::read(FileHandle* fh, off_t offset, size_t size, fuse_req_t r
 
 void FileSystem::free_space(acquired_cown<Block> & blk)
 {
-  printf("Deallocating block with id:%d\n",blk->block_number);
+  printf("Deaallocating block with id:%d\n",blk->block_number);
   blk->buf.release();
   //avail_bytes_+= BLOCK_SIZE;
   return ;
