@@ -674,9 +674,6 @@ static void stackfs_ll_setattr(fuse_req_t req, fuse_ino_t ino,
 static void stackfs_ll_create(fuse_req_t req, fuse_ino_t parent,
                               const char *name, mode_t mode, struct fuse_file_info *fi)
 {
-    //fi->parallel_direct_writes=1;
-    //fi->direct_io=1;
-
     int fd, res;
     struct fuse_entry_param e;
     char *fullPath = NULL;
@@ -832,8 +829,6 @@ static void stackfs_ll_open(fuse_req_t req, fuse_ino_t ino,
                             struct fuse_file_info *fi)
 {
     int fd;
-    //fi->parallel_direct_writes  =1;
-    //fi->direct_io=1;
     fd = open(lo_name(req, ino), fi->flags);
 
     //StackFS_trace("Open called on name : %s and fuse inode : %llu kernel inode : %llu fd : %d",
@@ -1016,19 +1011,13 @@ uint64_t count = 0;
 static void stackfs_ll_write(fuse_req_t req, fuse_ino_t ino, const char *buf,
                              size_t size, off_t off, struct fuse_file_info *fi)
 {
+    int res;
+    (void) ino;
 
-    //count++;
-    //printf("off %zu, size: %zu\n",off,size);
+    res = pwrite(fi->fh, buf, size, off);
 
-    //int res;
-    //(void) ino;
-
-    //StackFS_trace("Write name : %s, inode : %llu, off : %lu, size : %zu",
-    //		lo_name(req, ino), lo_inode(req, ino)->ino, off, size);
-    //res = pwrite(fi->fh, buf, size, off);
-
-    //if (res == -1)
-    //    return (void) fuse_reply_err(req, errno);
+    if (res == -1)
+        return (void) fuse_reply_err(req, errno);
 
     fuse_reply_write(req, res);
 }
@@ -1221,6 +1210,8 @@ static void stackfs_ll_init(void *userdata,
 {
     conn->want &= ~FUSE_CAP_AUTO_INVAL_DATA;
 
+    if(conn->capable & FUSE_CAP_WRITEBACK_CACHE)
+        conn->want |= FUSE_CAP_WRITEBACK_CACHE;
 
     if(conn->capable & FUSE_CAP_PARALLEL_DIROPS)
         conn->want |= FUSE_CAP_PARALLEL_DIROPS;
@@ -1327,8 +1318,8 @@ void sig_handler(int signo)
         printf("received SIGINT\n");
 
     system("fusermount -u /tmp/ssfs");
-    system("sudo umount /home/sevag/myram");
-    system("cd /home/sevag/myram; rm -rf *; cd;");
+    system("sudo umount /home/sevag/fuse_ext4");
+    system("cd /home/sevag/fuse_ext4; rm -rf *; cd;");
     exit(signo);
 }
 
@@ -1346,14 +1337,14 @@ int main(int argc, char **argv)
     signal(SIGINT, sig_handler);
 
     const char* password = "1234";
-    const char* command = "sudo -S mount -t tmpfs -o size=10G myramdisk /home/sevag/myram";
+    const char* command = "sudo -S mount -t tmpfs -o size=10G myramdisk /home/sevag/fuse_ext4";
 
     // Construct the sudo command with the password
     char sudoCommand[200];
     snprintf(sudoCommand, sizeof(sudoCommand), "echo %s | %s", password, command);
 
     // Execute the sudo command
-    system("mkdir /home/sevag/myram");
+    system("mkdir /home/sevag/fuse_ext4");
     printf("Executing: %s\n", sudoCommand);
     system(sudoCommand);
 
